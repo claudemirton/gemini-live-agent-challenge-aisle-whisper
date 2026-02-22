@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100" fill="none" stroke="#00E6B8" stroke-linecap="round" stroke-linejoin="round" shape-rendering="geometricPrecision">
+  <rect x="18" y="48" width="60" height="33" rx="5" ry="5" stroke-width="6"/>
+  <path d="M 23 48 L 6 38" stroke-width="6"/>
+  <circle cx="33" cy="88" r="6" fill="#00E6B8" stroke="none"/>
+  <circle cx="63" cy="88" r="6" fill="#00E6B8" stroke="none"/>
+  <path d="M 88.553 50.411 A 8.000 8.000 0 0 1 88.553 59.589" stroke-width="3.600"/>
+  <path d="M 95.106 45.823 A 16.000 16.000 0 0 1 95.106 64.177" stroke-width="2.700"/>
+  <path d="M 101.660 41.234 A 24.000 24.000 0 0 1 101.660 68.766" stroke-width="2.000"/>
+  <title>Aisle Whisper favicon</title>
+  <desc>Minimal shopping cart with whisper arcs, mint on transparent background.</desc>
+</svg>
