@@ -156,8 +156,12 @@ function App() {
   const [view, setView] = useState<"home" | "audit" | "summary" | "settings">(
     "home",
   );
+  const [checklistResult, setChecklistResult] = useState<unknown | null>(null);
+  const [printTagsResult, setPrintTagsResult] = useState<unknown | null>(null);
 
   const handleStartAudit = () => {
+    setChecklistResult(null);
+    setPrintTagsResult(null);
     setView("audit");
   };
 
@@ -201,6 +205,8 @@ function App() {
             <AuditScreen
               onBack={() => setView("home")}
               onAuditShelf={handleAuditShelf}
+              onChecklistGenerated={setChecklistResult}
+              onPrintTagsGenerated={setPrintTagsResult}
             />
           </Container>
         </Box>
@@ -217,7 +223,11 @@ function App() {
           }}
         >
           <Container maxWidth="lg">
-            <AuditSummaryScreen onBackToAudit={handleBackToAudit} />
+            <AuditSummaryScreen
+              onBackToAudit={handleBackToAudit}
+              checklistResult={checklistResult}
+              printTagsResult={printTagsResult}
+            />
           </Container>
         </Box>
       ) : (

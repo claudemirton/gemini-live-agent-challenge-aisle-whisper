@@ -1,4 +1,4 @@
-import { Button, Card, Divider, Stack, Typography } from "@mui/material";
+import { Box, Button, Card, Divider, Stack, Typography } from "@mui/material";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
@@ -7,6 +7,8 @@ import RestartAltRoundedIcon from "@mui/icons-material/RestartAltRounded";
 
 interface AuditSummaryScreenProps {
   onBackToAudit: () => void;
+  checklistResult?: unknown;
+  printTagsResult?: unknown;
 }
 
 const mockSummary = {
@@ -29,7 +31,18 @@ const mockSummary = {
   ],
 };
 
-const AuditSummaryScreen = ({ onBackToAudit }: AuditSummaryScreenProps) => {
+const AuditSummaryScreen = ({
+  onBackToAudit,
+  checklistResult,
+  printTagsResult,
+}: AuditSummaryScreenProps) => {
+  const checklistPreview = checklistResult
+    ? JSON.stringify(checklistResult, null, 2)
+    : null;
+  const printPreview = printTagsResult
+    ? JSON.stringify(printTagsResult, null, 2)
+    : null;
+
   return (
     <Stack spacing={4} sx={{ width: "100%", maxWidth: 720, mx: "auto" }}>
       <Button
@@ -90,6 +103,64 @@ const AuditSummaryScreen = ({ onBackToAudit }: AuditSummaryScreenProps) => {
                 </Typography>
               </Stack>
             ))}
+          </Stack>
+
+          <Divider flexItem />
+
+          <Stack spacing={2}>
+            <Typography variant="h6" color="text.primary">
+              Generated Artifacts
+            </Typography>
+
+            <Card variant="outlined" sx={{ p: 2 }}>
+              <Stack spacing={1}>
+                <Typography variant="subtitle2" color="text.primary">
+                  Checklist response
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Source: POST /tool/create-checklist
+                </Typography>
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    p: 1.5,
+                    borderRadius: 1,
+                    bgcolor: "grey.100",
+                    overflowX: "auto",
+                    fontSize: "0.75rem",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {checklistPreview ?? "No checklist generated yet."}
+                </Box>
+              </Stack>
+            </Card>
+
+            <Card variant="outlined" sx={{ p: 2 }}>
+              <Stack spacing={1}>
+                <Typography variant="subtitle2" color="text.primary">
+                  Print tags response
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Source: POST /tool/create-shelf-tags
+                </Typography>
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    p: 1.5,
+                    borderRadius: 1,
+                    bgcolor: "grey.100",
+                    overflowX: "auto",
+                    fontSize: "0.75rem",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {printPreview ?? "No print payload generated yet."}
+                </Box>
+              </Stack>
+            </Card>
           </Stack>
 
           <Divider flexItem />

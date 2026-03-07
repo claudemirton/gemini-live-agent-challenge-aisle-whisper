@@ -39,7 +39,6 @@
     "workbox-window": "^7.4.0"
   },
   "overrides": {
-    "sharp": "^0.33.5",
     "sharp-ico": "^0.1.5"
   }
 }

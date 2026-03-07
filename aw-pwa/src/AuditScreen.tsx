@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Alert,
   Box,
   Button,
   Card,
   CardContent,
   CardHeader,
   Divider,
+  Snackbar,
   Stack,
   Typography,
 } from "@mui/material";
@@ -16,6 +18,87 @@ import MicOffRoundedIcon from "@mui/icons-material/MicOffRounded";
 import CropFreeRoundedIcon from "@mui/icons-material/CropFreeRounded";
 import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
 import LocalPrintshopRoundedIcon from "@mui/icons-material/LocalPrintshopRounded";
+import {
+  frameRateToIntervalMs,
+  loadSettingsFromStorage,
+  type AppSettings,
+} from "./settings";
+
+const BACKEND_WS_URL =
+  import.meta.env.VITE_BACKEND_WS_URL ?? "ws://localhost:8080/ws/live";
+const BACKEND_API_URL =
+  import.meta.env.VITE_BACKEND_API_URL ?? "http://localhost:8080";
+
+type ConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "ready"
+  | "disconnected"
+  | "error";
+
+function buildBridgeUrl(baseUrl: string, modelKey: string): string {
+  const url = new URL(baseUrl, window.location.origin);
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  }
+  if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  }
+  url.searchParams.set("model", modelKey);
+  return url.toString();
+}
+
+function toModelKey(streamModel: string): "default" | "deep" {
+  return streamModel === "pro" ? "deep" : "default";
+}
+
+function toThinkingTemperature(thinkingLevel: string): number {
+  if (thinkingLevel === "minimal") {
+    return 0.2;
+  }
+  if (thinkingLevel === "medium") {
+    return 0.65;
+  }
+  return 0.4;
+}
+
+function toLanguageInstruction(language: string): string {
+  if (language.toLowerCase() === "pt-br") {
+    return "Always respond in Brazilian Portuguese.";
+  }
+  return "Always respond in English.";
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("Could not encode frame payload."));
+        return;
+      }
+      const base64 = result.split(",")[1];
+      if (!base64) {
+        reject(new Error("Could not extract base64 frame data."));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("FileReader error"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary);
+}
 
 export interface OverlayDetection {
   id: string;
@@ -32,9 +115,14 @@ export interface OverlayDetection {
 interface CameraStreamProps {
   onFrame?: (frame: Blob) => void;
   overlay?: ReactNode;
+  frameIntervalMs?: number;
 }
 
-const CameraStream = ({ onFrame, overlay }: CameraStreamProps) => {
+const CameraStream = ({
+  onFrame,
+  overlay,
+  frameIntervalMs = 1000,
+}: CameraStreamProps) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -104,10 +192,10 @@ const CameraStream = ({ onFrame, overlay }: CameraStreamProps) => {
         "image/jpeg",
         0.7,
       );
-    }, 1000);
+    }, frameIntervalMs);
 
     return () => window.clearInterval(frameTimer);
-  }, [onFrame]);
+  }, [frameIntervalMs, onFrame]);
 
   return (
     <Card variant="outlined" sx={{ height: "100%" }}>
@@ -146,8 +234,8 @@ const CameraStream = ({ onFrame, overlay }: CameraStreamProps) => {
           <canvas ref={canvasRef} hidden />
         </Box>
         <Typography variant="body2" color="text.secondary">
-          Frames are sampled every second and streamed to the Gemini Live
-          session.
+          Frames are sampled every {Math.round(frameIntervalMs / 100) / 10}s and
+          streamed to the Gemini Live session.
         </Typography>
       </CardContent>
     </Card>
@@ -156,9 +244,15 @@ const CameraStream = ({ onFrame, overlay }: CameraStreamProps) => {
 
 interface VoiceCaptureProps {
   onAudioChunk?: (chunk: ArrayBuffer) => void;
+  pushToTalk?: boolean;
+  language?: string;
 }
 
-const VoiceCapture = ({ onAudioChunk }: VoiceCaptureProps) => {
+const VoiceCapture = ({
+  onAudioChunk,
+  pushToTalk = true,
+  language = "en",
+}: VoiceCaptureProps) => {
   const [recording, setRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
@@ -207,7 +301,7 @@ const VoiceCapture = ({ onAudioChunk }: VoiceCaptureProps) => {
       <CardHeader
         avatar={<MicRoundedIcon color={recording ? "error" : "primary"} />}
         title="Voice Capture"
-        subheader="Push-to-talk voice control"
+        subheader={`${pushToTalk ? "Push-to-talk" : "Tap-to-toggle"} • ${language.toUpperCase()}`}
       />
       <CardContent>
         <Stack spacing={2} alignItems="center">
@@ -220,13 +314,26 @@ const VoiceCapture = ({ onAudioChunk }: VoiceCaptureProps) => {
             color={recording ? "error" : "primary"}
             size="large"
             startIcon={recording ? <MicOffRoundedIcon /> : <MicRoundedIcon />}
-            onMouseDown={startRecorder}
-            onMouseUp={stopRecorder}
-            onMouseLeave={() => recording && stopRecorder()}
-            onTouchStart={startRecorder}
-            onTouchEnd={stopRecorder}
+            onMouseDown={pushToTalk ? startRecorder : undefined}
+            onMouseUp={pushToTalk ? stopRecorder : undefined}
+            onMouseLeave={
+              pushToTalk ? () => recording && stopRecorder() : undefined
+            }
+            onTouchStart={pushToTalk ? startRecorder : undefined}
+            onTouchEnd={pushToTalk ? stopRecorder : undefined}
+            onClick={
+              !pushToTalk
+                ? () => (recording ? stopRecorder() : startRecorder())
+                : undefined
+            }
           >
-            {recording ? "Release to send" : "Hold to talk"}
+            {pushToTalk
+              ? recording
+                ? "Release to send"
+                : "Hold to talk"
+              : recording
+                ? "Tap to stop"
+                : "Tap to start"}
           </Button>
         </Stack>
       </CardContent>
@@ -304,16 +411,35 @@ interface ActionPanelProps {
   onAudit: () => void;
   onGenerateChecklist: () => void;
   onPrintTags: () => void;
+  streamModel: string;
+  deepChecks: string;
+  thinkingLevel: string;
+  connectionStatus: ConnectionStatus;
+  checklistLoading: boolean;
+  printLoading: boolean;
+  language: string;
+  detailLevel: string;
 }
 
 const ActionPanel = ({
   onAudit,
   onGenerateChecklist,
   onPrintTags,
+  streamModel,
+  deepChecks,
+  thinkingLevel,
+  connectionStatus,
+  checklistLoading,
+  printLoading,
+  language,
+  detailLevel,
 }: ActionPanelProps) => {
   return (
     <Card variant="outlined">
-      <CardHeader title="Actions" subheader="Tools & exports" />
+      <CardHeader
+        title="Actions"
+        subheader={`Tools & exports • ${streamModel.toUpperCase()} • ${deepChecks.toUpperCase()} • ${thinkingLevel.toUpperCase()} • ${connectionStatus.toUpperCase()}`}
+      />
       <CardContent>
         <Stack spacing={2}>
           <Button
@@ -327,16 +453,29 @@ const ActionPanel = ({
             variant="outlined"
             onClick={onGenerateChecklist}
             startIcon={<ChecklistRoundedIcon />}
+            disabled={checklistLoading}
           >
-            Generate Checklist
+            {checklistLoading ? "Generating…" : "Generate Checklist"}
           </Button>
           <Button
             variant="outlined"
             onClick={onPrintTags}
             startIcon={<LocalPrintshopRoundedIcon />}
+            disabled={printLoading}
           >
-            Print Tags
+            {printLoading ? "Preparing…" : "Print Tags"}
           </Button>
+          <Typography variant="caption" color="text.secondary">
+            Checklist consumes: language ({language.toUpperCase()}), detail mode
+            ({detailLevel.toUpperCase()}), deep checks (
+            {deepChecks.toUpperCase()}) and thinking level (
+            {thinkingLevel.toUpperCase()}).
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Print consumes: language ({language.toUpperCase()}), detail mode (
+            {detailLevel.toUpperCase()}) and stream model (
+            {streamModel.toUpperCase()}).
+          </Typography>
         </Stack>
       </CardContent>
     </Card>
@@ -346,9 +485,25 @@ const ActionPanel = ({
 interface AuditScreenProps {
   onBack?: () => void;
   onAuditShelf: () => void;
+  onChecklistGenerated?: (payload: unknown) => void;
+  onPrintTagsGenerated?: (payload: unknown) => void;
 }
 
-const AuditScreen = ({ onBack, onAuditShelf }: AuditScreenProps) => {
+const AuditScreen = ({
+  onBack,
+  onAuditShelf,
+  onChecklistGenerated,
+  onPrintTagsGenerated,
+}: AuditScreenProps) => {
+  const [settings] = useState<AppSettings>(() => loadSettingsFromStorage());
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [printLoading, setPrintLoading] = useState(false);
+  const [actionNotice, setActionNotice] = useState<{
+    severity: "success" | "error";
+    message: string;
+  } | null>(null);
   const [detections, setDetections] = useState<OverlayDetection[]>(() => [
     {
       id: "gondola-1",
@@ -364,13 +519,242 @@ const AuditScreen = ({ onBack, onAuditShelf }: AuditScreenProps) => {
     },
   ]);
 
-  const handleFrame = useCallback((frame: Blob) => {
-    console.debug("JPEG frame", frame);
-  }, []);
+  const websocketRef = useRef<WebSocket | null>(null);
+  const sessionReadyRef = useRef(false);
 
-  const handleAudioChunk = useCallback((chunk: ArrayBuffer) => {
-    console.debug("Audio chunk", chunk.byteLength);
-  }, []);
+  useEffect(() => {
+    const modelKey = toModelKey(settings.streamModel);
+    const wsUrl = buildBridgeUrl(BACKEND_WS_URL, modelKey);
+    const websocket = new WebSocket(wsUrl);
+    websocketRef.current = websocket;
+    sessionReadyRef.current = false;
+    setConnectionStatus("connecting");
+
+    websocket.onopen = () => {
+      setConnectionStatus("connected");
+      websocket.send(
+        JSON.stringify({
+          type: "start",
+          model: modelKey,
+          sessionConfig: {
+            generationConfig: {
+              temperature: toThinkingTemperature(settings.thinkingLevel),
+            },
+            systemInstruction: {
+              parts: [{ text: toLanguageInstruction(settings.language) }],
+            },
+          },
+        }),
+      );
+    };
+
+    websocket.onmessage = (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          setupComplete?: unknown;
+          setup_complete?: unknown;
+        };
+
+        if (payload.type === "error") {
+          setConnectionStatus("error");
+          return;
+        }
+
+        if (payload.type === "gemini-closed") {
+          setConnectionStatus("disconnected");
+          sessionReadyRef.current = false;
+          return;
+        }
+
+        if (payload.setupComplete || payload.setup_complete) {
+          setConnectionStatus("ready");
+          sessionReadyRef.current = true;
+        }
+      } catch {
+        setConnectionStatus("ready");
+        sessionReadyRef.current = true;
+      }
+    };
+
+    websocket.onerror = () => {
+      setConnectionStatus("error");
+      sessionReadyRef.current = false;
+    };
+
+    websocket.onclose = () => {
+      setConnectionStatus("disconnected");
+      sessionReadyRef.current = false;
+    };
+
+    return () => {
+      sessionReadyRef.current = false;
+      websocket.close();
+      if (websocketRef.current === websocket) {
+        websocketRef.current = null;
+      }
+    };
+  }, [settings.language, settings.streamModel, settings.thinkingLevel]);
+
+  const findingsSummary = useCallback(() => {
+    const byLabel = detections.reduce<Record<string, number>>(
+      (acc, detection) => {
+        acc[detection.label] = (acc[detection.label] ?? 0) + 1;
+        return acc;
+      },
+      {},
+    );
+
+    return Object.entries(byLabel).map(([label, count]) => ({ label, count }));
+  }, [detections]);
+
+  const handleGenerateChecklist = useCallback(async () => {
+    setChecklistLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/tool/create-checklist`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          aisle: "Aisle 12 (Bay 12A)",
+          findings: findingsSummary(),
+          settings: {
+            language: settings.language,
+            detailLevel: settings.detailLevel,
+            deepChecks: settings.deepChecks,
+            thinkingLevel: settings.thinkingLevel,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Checklist request failed (${response.status})`);
+      }
+
+      const payload = (await response.json()) as unknown;
+      console.info("Checklist generated", payload);
+      onChecklistGenerated?.(payload);
+      setActionNotice({
+        severity: "success",
+        message: "Checklist generated successfully.",
+      });
+    } catch (error) {
+      setActionNotice({
+        severity: "error",
+        message: (error as Error).message,
+      });
+    } finally {
+      setChecklistLoading(false);
+    }
+  }, [
+    findingsSummary,
+    onChecklistGenerated,
+    settings.deepChecks,
+    settings.detailLevel,
+    settings.language,
+    settings.thinkingLevel,
+  ]);
+
+  const handlePrintTags = useCallback(async () => {
+    setPrintLoading(true);
+    try {
+      const response = await fetch(
+        `${BACKEND_API_URL}/tool/create-shelf-tags`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            aisle: "Aisle 12 (Bay 12A)",
+            findings: findingsSummary(),
+            settings: {
+              language: settings.language,
+              detailLevel: settings.detailLevel,
+              streamModel: settings.streamModel,
+            },
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Print tags request failed (${response.status})`);
+      }
+
+      const payload = (await response.json()) as unknown;
+      console.info("Print tags created", payload);
+      onPrintTagsGenerated?.(payload);
+      setActionNotice({
+        severity: "success",
+        message: "Tag print payload created successfully.",
+      });
+    } catch (error) {
+      setActionNotice({
+        severity: "error",
+        message: (error as Error).message,
+      });
+    } finally {
+      setPrintLoading(false);
+    }
+  }, [
+    findingsSummary,
+    onPrintTagsGenerated,
+    settings.detailLevel,
+    settings.language,
+    settings.streamModel,
+  ]);
+
+  const handleFrame = useCallback(
+    async (frame: Blob) => {
+      const ws = websocketRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN || !sessionReadyRef.current) {
+        return;
+      }
+
+      const data = await blobToBase64(frame);
+      ws.send(
+        JSON.stringify({
+          type: "video-frame",
+          mimeType: "image/jpeg",
+          data,
+        }),
+      );
+
+      console.debug("JPEG frame", {
+        size: frame.size,
+        frameRate: settings.frameRate,
+        detailLevel: settings.detailLevel,
+      });
+    },
+    [settings.detailLevel, settings.frameRate],
+  );
+
+  const handleAudioChunk = useCallback(
+    (chunk: ArrayBuffer) => {
+      const ws = websocketRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN && sessionReadyRef.current) {
+        ws.send(
+          JSON.stringify({
+            type: "audio-chunk",
+            mimeType: "audio/webm;codecs=opus",
+            data: arrayBufferToBase64(chunk),
+          }),
+        );
+      }
+
+      console.debug("Audio chunk", {
+        bytes: chunk.byteLength,
+        language: settings.language,
+        pushToTalk: settings.pushToTalk,
+      });
+    },
+    [settings.language, settings.pushToTalk],
+  );
 
   const cycleMockOverlay = useCallback(() => {
     setDetections((prev) =>
@@ -411,18 +795,47 @@ const AuditScreen = ({ onBack, onAuditShelf }: AuditScreenProps) => {
           <CameraStream
             onFrame={handleFrame}
             overlay={<OverlayCanvas detections={detections} />}
+            frameIntervalMs={frameRateToIntervalMs(settings.frameRate)}
           />
         </Stack>
         <Stack spacing={3} flex={{ xs: 1, md: 1 }}>
-          <VoiceCapture onAudioChunk={handleAudioChunk} />
+          <VoiceCapture
+            onAudioChunk={handleAudioChunk}
+            pushToTalk={settings.pushToTalk}
+            language={settings.language}
+          />
           <Divider />
           <ActionPanel
             onAudit={onAuditShelf}
-            onGenerateChecklist={() => console.info("Checklist requested")}
-            onPrintTags={() => console.info("Print requested")}
+            onGenerateChecklist={handleGenerateChecklist}
+            onPrintTags={handlePrintTags}
+            streamModel={settings.streamModel}
+            deepChecks={settings.deepChecks}
+            thinkingLevel={settings.thinkingLevel}
+            connectionStatus={connectionStatus}
+            checklistLoading={checklistLoading}
+            printLoading={printLoading}
+            language={settings.language}
+            detailLevel={settings.detailLevel}
           />
         </Stack>
       </Stack>
+
+      <Snackbar
+        open={Boolean(actionNotice)}
+        autoHideDuration={3000}
+        onClose={(_, reason) => {
+          if (reason === "clickaway") {
+            return;
+          }
+          setActionNotice(null);
+        }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert severity={actionNotice?.severity ?? "success"} variant="filled">
+          {actionNotice?.message ?? "Done"}
+        </Alert>
+      </Snackbar>
     </Stack>
   );
 };
