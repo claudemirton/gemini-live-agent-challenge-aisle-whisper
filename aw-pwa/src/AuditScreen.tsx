@@ -28,6 +28,7 @@ const BACKEND_WS_URL =
   import.meta.env.VITE_BACKEND_WS_URL ?? "ws://localhost:8080/ws/live";
 const BACKEND_API_URL =
   import.meta.env.VITE_BACKEND_API_URL ?? "http://localhost:8080";
+const SHOW_OVERLAY_DEBUG_PANEL = import.meta.env.DEV;
 
 type ConnectionStatus =
   | "connecting"
@@ -110,6 +111,87 @@ export interface OverlayDetection {
     width: number;
     height: number;
   };
+}
+
+interface OverlayUpdateMessage {
+  type: "overlay-update";
+  detections?: unknown;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function normalizeOverlayDetections(
+  payload: unknown,
+): OverlayDetection[] | null {
+  if (!Array.isArray(payload)) {
+    return null;
+  }
+
+  const normalized = payload
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const candidate = entry as {
+        id?: unknown;
+        label?: unknown;
+        score?: unknown;
+        box?: {
+          x?: unknown;
+          y?: unknown;
+          width?: unknown;
+          height?: unknown;
+        };
+      };
+
+      const box = candidate.box;
+      if (!box || typeof box !== "object") {
+        return null;
+      }
+
+      const x = typeof box.x === "number" ? box.x : NaN;
+      const y = typeof box.y === "number" ? box.y : NaN;
+      const width = typeof box.width === "number" ? box.width : NaN;
+      const height = typeof box.height === "number" ? box.height : NaN;
+      if (
+        Number.isNaN(x) ||
+        Number.isNaN(y) ||
+        Number.isNaN(width) ||
+        Number.isNaN(height)
+      ) {
+        return null;
+      }
+
+      return {
+        id:
+          typeof candidate.id === "string" && candidate.id.trim().length > 0
+            ? candidate.id
+            : `det-${index}`,
+        label:
+          typeof candidate.label === "string" &&
+          candidate.label.trim().length > 0
+            ? candidate.label
+            : "Finding",
+        score:
+          typeof candidate.score === "number" ? clamp01(candidate.score) : 0.8,
+        box: {
+          x: clamp01(x),
+          y: clamp01(y),
+          width: clamp01(width),
+          height: clamp01(height),
+        },
+      };
+    })
+    .filter((entry): entry is OverlayDetection => Boolean(entry));
+
+  if (!normalized.length) {
+    return null;
+  }
+
+  return normalized;
 }
 
 interface CameraStreamProps {
@@ -504,20 +586,10 @@ const AuditScreen = ({
     severity: "success" | "error";
     message: string;
   } | null>(null);
-  const [detections, setDetections] = useState<OverlayDetection[]>(() => [
-    {
-      id: "gondola-1",
-      label: "GAP",
-      score: 0.94,
-      box: { x: 0.05, y: 0.12, width: 0.25, height: 0.55 },
-    },
-    {
-      id: "label-3",
-      label: "Label mismatch",
-      score: 0.87,
-      box: { x: 0.55, y: 0.3, width: 0.18, height: 0.2 },
-    },
-  ]);
+  const [detections, setDetections] = useState<OverlayDetection[]>([]);
+  const [lastOverlayUpdateTs, setLastOverlayUpdateTs] = useState<number | null>(
+    null,
+  );
 
   const websocketRef = useRef<WebSocket | null>(null);
   const sessionReadyRef = useRef(false);
@@ -529,6 +601,8 @@ const AuditScreen = ({
     websocketRef.current = websocket;
     sessionReadyRef.current = false;
     setConnectionStatus("connecting");
+    setDetections([]);
+    setLastOverlayUpdateTs(null);
 
     websocket.onopen = () => {
       setConnectionStatus("connected");
@@ -558,7 +632,19 @@ const AuditScreen = ({
           type?: string;
           setupComplete?: unknown;
           setup_complete?: unknown;
+          detections?: unknown;
         };
+
+        if (payload.type === "overlay-update") {
+          const parsedDetections = normalizeOverlayDetections(
+            (payload as OverlayUpdateMessage).detections,
+          );
+          if (parsedDetections) {
+            setDetections(parsedDetections);
+            setLastOverlayUpdateTs(Date.now());
+          }
+          return;
+        }
 
         if (payload.type === "error") {
           setConnectionStatus("error");
@@ -589,6 +675,8 @@ const AuditScreen = ({
     websocket.onclose = () => {
       setConnectionStatus("disconnected");
       sessionReadyRef.current = false;
+      setDetections([]);
+      setLastOverlayUpdateTs(null);
     };
 
     return () => {
@@ -597,6 +685,8 @@ const AuditScreen = ({
       if (websocketRef.current === websocket) {
         websocketRef.current = null;
       }
+      setDetections([]);
+      setLastOverlayUpdateTs(null);
     };
   }, [settings.language, settings.streamModel, settings.thinkingLevel]);
 
@@ -756,23 +846,6 @@ const AuditScreen = ({
     [settings.language, settings.pushToTalk],
   );
 
-  const cycleMockOverlay = useCallback(() => {
-    setDetections((prev) =>
-      prev.map((det) => ({
-        ...det,
-        score: Math.max(
-          0.5,
-          Math.min(0.99, det.score + (Math.random() - 0.5) * 0.1),
-        ),
-      })),
-    );
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(cycleMockOverlay, 4000);
-    return () => window.clearInterval(timer);
-  }, [cycleMockOverlay]);
-
   return (
     <Stack spacing={4} sx={{ width: "100%" }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -797,6 +870,27 @@ const AuditScreen = ({
             overlay={<OverlayCanvas detections={detections} />}
             frameIntervalMs={frameRateToIntervalMs(settings.frameRate)}
           />
+          {SHOW_OVERLAY_DEBUG_PANEL && (
+            <Card variant="outlined">
+              <CardHeader title="Overlay Debug" subheader="Development only" />
+              <CardContent>
+                <Stack spacing={0.5}>
+                  <Typography variant="body2" color="text.secondary">
+                    WS status: {connectionStatus}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Active detections: {detections.length}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Last overlay update:{" "}
+                    {lastOverlayUpdateTs
+                      ? new Date(lastOverlayUpdateTs).toLocaleTimeString()
+                      : "no overlay messages yet"}
+                  </Typography>
+                </Stack>
+              </CardContent>
+            </Card>
+          )}
         </Stack>
         <Stack spacing={3} flex={{ xs: 1, md: 1 }}>
           <VoiceCapture
