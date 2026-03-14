@@ -28,7 +28,9 @@ const BACKEND_WS_URL =
   import.meta.env.VITE_BACKEND_WS_URL ?? "ws://localhost:8080/ws/live";
 const BACKEND_API_URL =
   import.meta.env.VITE_BACKEND_API_URL ?? "http://localhost:8080";
-const SHOW_OVERLAY_DEBUG_PANEL = import.meta.env.DEV;
+const SHOW_OVERLAY_DEBUG_PANEL =
+  import.meta.env.DEV || import.meta.env.VITE_SHOW_OVERLAY_DEBUG === "true";
+const OVERLAY_PROMPT_INTERVAL_MS = 3500;
 
 type ConnectionStatus =
   | "connecting"
@@ -76,16 +78,16 @@ function toAudioSessionConfig(thinkingLevel: string): Record<string, unknown> {
   return {
     generationConfig: {
       temperature: toThinkingTemperature(thinkingLevel),
-      responseModalities: ["AUDIO", "TEXT"],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: {
-            voiceName: "Aoede",
-          },
-        },
-      },
+      responseModalities: ["AUDIO"],
     },
   };
+}
+
+function toOverlayCommand(language: string): string {
+  if (language.toLowerCase() === "pt-br") {
+    return `Analise o quadro de video mais recente e responda SOMENTE com JSON valido no formato: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use coordenadas normalizadas de 0 a 1.`;
+  }
+  return `Analyze the most recent video frame and reply ONLY with valid JSON in this format: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use normalized coordinates from 0 to 1.`;
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -612,6 +614,7 @@ const AuditScreen = ({
 
   const websocketRef = useRef<WebSocket | null>(null);
   const sessionReadyRef = useRef(false);
+  const lastOverlayPromptAtRef = useRef(0);
 
   useEffect(() => {
     const modelKey = toModelKey(settings.streamModel);
@@ -619,6 +622,7 @@ const AuditScreen = ({
     const websocket = new WebSocket(wsUrl);
     websocketRef.current = websocket;
     sessionReadyRef.current = false;
+    lastOverlayPromptAtRef.current = 0;
     setConnectionStatus("connecting");
     setDetections([]);
     setLastOverlayUpdateTs(null);
@@ -639,6 +643,12 @@ const AuditScreen = ({
           },
         }),
       );
+
+      // Native-audio live sessions may not emit an explicit setupComplete event.
+      // Mark session ready after start is sent so frame + text-command flow can begin.
+      sessionReadyRef.current = true;
+      setConnectionStatus("ready");
+      setLastSocketEvent("start sent; ready for frame analysis");
     };
 
     websocket.onmessage = (event) => {
@@ -714,6 +724,7 @@ const AuditScreen = ({
       sessionReadyRef.current = false;
       setDetections([]);
       setLastOverlayUpdateTs(null);
+      lastOverlayPromptAtRef.current = 0;
       const reason = event.reason || "no reason";
       setLastSocketEvent(`socket closed (${event.code}): ${reason}`);
     };
@@ -726,6 +737,7 @@ const AuditScreen = ({
       }
       setDetections([]);
       setLastOverlayUpdateTs(null);
+      lastOverlayPromptAtRef.current = 0;
       setLastSocketEvent("cleanup complete");
     };
   }, [settings.language, settings.streamModel, settings.thinkingLevel]);
@@ -855,13 +867,24 @@ const AuditScreen = ({
         }),
       );
 
+      const now = Date.now();
+      if (now - lastOverlayPromptAtRef.current >= OVERLAY_PROMPT_INTERVAL_MS) {
+        ws.send(
+          JSON.stringify({
+            type: "text-command",
+            text: toOverlayCommand(settings.language),
+          }),
+        );
+        lastOverlayPromptAtRef.current = now;
+      }
+
       console.debug("JPEG frame", {
         size: frame.size,
         frameRate: settings.frameRate,
         detailLevel: settings.detailLevel,
       });
     },
-    [settings.detailLevel, settings.frameRate],
+    [settings.detailLevel, settings.frameRate, settings.language],
   );
 
   const handleAudioChunk = useCallback(
