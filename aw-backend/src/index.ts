@@ -5,7 +5,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import WebSocket, { WebSocketServer } from "ws";
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const app = express();
 
@@ -136,7 +136,9 @@ function normalizeOverlayDetection(value: unknown): OverlayDetection | null {
         ? candidate.label
         : "Finding",
     score:
-      typeof candidate.score === "number" ? clamp01(candidate.score) : clamp01(0.8),
+      typeof candidate.score === "number"
+        ? clamp01(candidate.score)
+        : clamp01(0.8),
     box: {
       x: clamp01(x),
       y: clamp01(y),
@@ -196,7 +198,10 @@ function extractJsonObjectOrArray(text: string): unknown | null {
   return parseJsonText(maybeJson);
 }
 
-function extractTextCandidatesFromPayload(value: unknown, bag: string[] = []): string[] {
+function extractTextCandidatesFromPayload(
+  value: unknown,
+  bag: string[] = [],
+): string[] {
   if (!value) {
     return bag;
   }
@@ -220,7 +225,9 @@ function extractTextCandidatesFromPayload(value: unknown, bag: string[] = []): s
   return bag;
 }
 
-function parseOverlayDetectionsFromGeminiMessage(raw: WebSocket.RawData): OverlayDetection[] | null {
+function parseOverlayDetectionsFromGeminiMessage(
+  raw: WebSocket.RawData,
+): OverlayDetection[] | null {
   if (typeof raw !== "string") {
     return null;
   }
@@ -235,7 +242,9 @@ function parseOverlayDetectionsFromGeminiMessage(raw: WebSocket.RawData): Overla
     return toOverlayDetections(direct.detections);
   }
 
-  const directDetections = toOverlayDetections((parsed as { detections?: unknown }).detections);
+  const directDetections = toOverlayDetections(
+    (parsed as { detections?: unknown }).detections,
+  );
   if (directDetections) {
     return directDetections;
   }
@@ -247,7 +256,9 @@ function parseOverlayDetectionsFromGeminiMessage(raw: WebSocket.RawData): Overla
       continue;
     }
 
-    const nestedDetections = toOverlayDetections((nested as { detections?: unknown }).detections);
+    const nestedDetections = toOverlayDetections(
+      (nested as { detections?: unknown }).detections,
+    );
     if (nestedDetections) {
       return nestedDetections;
     }
@@ -571,6 +582,9 @@ if (require.main === module) {
   setupRealtimeBridge(server);
 
   server.listen(port, () => {
+    console.log(
+      `Resolved models: default=${MODEL_MAP.default}, deep=${MODEL_MAP.deep}`,
+    );
     console.log(`Backend listening on http://localhost:${port}`);
     console.log(
       `WebSocket bridge ready at ${process.env.GEMINI_LIVE_PATH ?? "/ws/live"}`,
