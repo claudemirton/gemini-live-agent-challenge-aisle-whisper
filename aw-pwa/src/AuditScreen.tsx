@@ -64,10 +64,28 @@ function toThinkingTemperature(thinkingLevel: string): number {
 }
 
 function toLanguageInstruction(language: string): string {
+  const overlayContract =
+    'When analyzing camera frames, include a strict JSON object with this exact shape: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use normalized 0..1 coordinates and return valid JSON only when detections are present.';
   if (language.toLowerCase() === "pt-br") {
-    return "Always respond in Brazilian Portuguese.";
+    return `Always respond in Brazilian Portuguese. ${overlayContract}`;
   }
-  return "Always respond in English.";
+  return `Always respond in English. ${overlayContract}`;
+}
+
+function toAudioSessionConfig(thinkingLevel: string): Record<string, unknown> {
+  return {
+    generationConfig: {
+      temperature: toThinkingTemperature(thinkingLevel),
+      responseModalities: ["AUDIO", "TEXT"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: "Aoede",
+          },
+        },
+      },
+    },
+  };
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -590,6 +608,7 @@ const AuditScreen = ({
   const [lastOverlayUpdateTs, setLastOverlayUpdateTs] = useState<number | null>(
     null,
   );
+  const [lastSocketEvent, setLastSocketEvent] = useState("waiting for WS");
 
   const websocketRef = useRef<WebSocket | null>(null);
   const sessionReadyRef = useRef(false);
@@ -603,17 +622,17 @@ const AuditScreen = ({
     setConnectionStatus("connecting");
     setDetections([]);
     setLastOverlayUpdateTs(null);
+    setLastSocketEvent(`connecting to ${wsUrl}`);
 
     websocket.onopen = () => {
       setConnectionStatus("connected");
+      setLastSocketEvent("socket open; sending start message");
       websocket.send(
         JSON.stringify({
           type: "start",
           model: modelKey,
           sessionConfig: {
-            generationConfig: {
-              temperature: toThinkingTemperature(settings.thinkingLevel),
-            },
+            ...toAudioSessionConfig(settings.thinkingLevel),
             systemInstruction: {
               parts: [{ text: toLanguageInstruction(settings.language) }],
             },
@@ -642,41 +661,61 @@ const AuditScreen = ({
           if (parsedDetections) {
             setDetections(parsedDetections);
             setLastOverlayUpdateTs(Date.now());
+            setLastSocketEvent(
+              `overlay-update received (${parsedDetections.length} detections)`,
+            );
           }
           return;
         }
 
         if (payload.type === "error") {
           setConnectionStatus("error");
+          const message =
+            typeof (payload as { message?: unknown }).message === "string"
+              ? (payload as { message: string }).message
+              : "unknown backend error";
+          setLastSocketEvent(`backend error: ${message}`);
           return;
         }
 
         if (payload.type === "gemini-closed") {
           setConnectionStatus("disconnected");
           sessionReadyRef.current = false;
+          const reason =
+            typeof (payload as { reason?: unknown }).reason === "string"
+              ? (payload as { reason: string }).reason
+              : "no reason provided";
+          setLastSocketEvent(`gemini-closed: ${reason}`);
           return;
         }
 
         if (payload.setupComplete || payload.setup_complete) {
           setConnectionStatus("ready");
           sessionReadyRef.current = true;
+          setLastSocketEvent("setup complete");
         }
       } catch {
         setConnectionStatus("ready");
         sessionReadyRef.current = true;
+        setLastSocketEvent("non-JSON message from backend");
       }
     };
 
     websocket.onerror = () => {
       setConnectionStatus("error");
       sessionReadyRef.current = false;
+      setLastSocketEvent("browser websocket error");
     };
 
-    websocket.onclose = () => {
-      setConnectionStatus("disconnected");
+    websocket.onclose = (event) => {
+      setConnectionStatus((previous) =>
+        previous === "error" ? "error" : "disconnected",
+      );
       sessionReadyRef.current = false;
       setDetections([]);
       setLastOverlayUpdateTs(null);
+      const reason = event.reason || "no reason";
+      setLastSocketEvent(`socket closed (${event.code}): ${reason}`);
     };
 
     return () => {
@@ -687,6 +726,7 @@ const AuditScreen = ({
       }
       setDetections([]);
       setLastOverlayUpdateTs(null);
+      setLastSocketEvent("cleanup complete");
     };
   }, [settings.language, settings.streamModel, settings.thinkingLevel]);
 
@@ -877,6 +917,24 @@ const AuditScreen = ({
                 <Stack spacing={0.5}>
                   <Typography variant="body2" color="text.secondary">
                     WS status: {connectionStatus}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ wordBreak: "break-word" }}
+                  >
+                    WS target:{" "}
+                    {buildBridgeUrl(
+                      BACKEND_WS_URL,
+                      toModelKey(settings.streamModel),
+                    )}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ wordBreak: "break-word" }}
+                  >
+                    Last socket event: {lastSocketEvent}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
                     Active detections: {detections.length}
