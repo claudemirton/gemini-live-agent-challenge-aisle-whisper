@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:prod": "VITE_BACKEND_WS_URL=${VITE_BACKEND_WS_URL:?set VITE_BACKEND_WS_URL} VITE_BACKEND_API_URL=${VITE_BACKEND_API_URL:?set VITE_BACKEND_API_URL} npm run build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
