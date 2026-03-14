@@ -5,7 +5,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import WebSocket, { WebSocketServer } from "ws";
 
-dotenv.config({ override: true });
+dotenv.config();
 
 const app = express();
 
@@ -58,6 +58,10 @@ type ClientMessage =
       type: "audio-chunk";
       data: string;
       mimeType?: string;
+    }
+  | {
+      type: "text-command";
+      text: string;
     }
   | { type: "stop" }
   | { type: "ping" };
@@ -530,6 +534,32 @@ function setupRealtimeBridge(server: http.Server) {
                     mimeType: message.mimeType ?? "audio/webm;codecs=opus",
                     data: message.data,
                   },
+                },
+              }),
+            );
+            break;
+          }
+          case "text-command": {
+            if (!hasSentSetup) {
+              client.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "Session not started. Send a 'start' message first.",
+                }),
+              );
+              break;
+            }
+            const socket = await ensureGeminiSocket();
+            socket.send(
+              JSON.stringify({
+                clientContent: {
+                  turns: [
+                    {
+                      role: "user",
+                      parts: [{ text: message.text }],
+                    },
+                  ],
+                  turnComplete: true,
                 },
               }),
             );
