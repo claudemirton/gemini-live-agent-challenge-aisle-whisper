@@ -7,7 +7,9 @@ import {
   Card,
   CardContent,
   CardHeader,
-  Divider,
+  FormControl,
+  MenuItem,
+  Select,
   Snackbar,
   Stack,
   Typography,
@@ -30,6 +32,8 @@ const BACKEND_API_URL =
 const SHOW_OVERLAY_DEBUG_PANEL =
   import.meta.env.DEV || import.meta.env.VITE_SHOW_OVERLAY_DEBUG === "true";
 const OVERLAY_PROMPT_INTERVAL_MS = 3500;
+
+type IssueFocusKey = "all" | "alignment" | "gaps" | "restock";
 
 type ConnectionStatus =
   | "connecting"
@@ -82,11 +86,46 @@ function toAudioSessionConfig(thinkingLevel: string): Record<string, unknown> {
   };
 }
 
-function toOverlayCommand(language: string): string {
-  if (language.toLowerCase() === "pt-br") {
-    return `Analise o quadro de video mais recente e responda SOMENTE com JSON valido no formato: {"detections":[{"id":"string","label":"GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Detecte apenas problemas de prateleira (espacos vazios, desalinhamento, baixo estoque, item fora do lugar). Use coordenadas normalizadas de 0 a 1 e nao retorne nomes de produtos.`;
+function toIssueFocusLabel(language: string, focus: IssueFocusKey): string {
+  const isPortuguese = language.toLowerCase() === "pt-br";
+  const labels: Record<IssueFocusKey, string> = isPortuguese
+    ? {
+        all: "Todos os problemas",
+        alignment: "Alinhamento",
+        gaps: "Espacos vazios",
+        restock: "Reposicao",
+      }
+    : {
+        all: "All shelf issues",
+        alignment: "Facing alignment",
+        gaps: "Shelf gaps",
+        restock: "Restock priority",
+      };
+
+  return labels[focus];
+}
+
+function toAllowedLabelsForFocus(focus: IssueFocusKey): string {
+  if (focus === "alignment") {
+    return "MISALIGNED";
   }
-  return `Analyze the most recent video frame and reply ONLY with valid JSON in this format: {"detections":[{"id":"string","label":"GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Detect only shelf issues (gaps, misalignment, low stock, out-of-place). Use normalized coordinates from 0 to 1 and do not return product names.`;
+  if (focus === "gaps") {
+    return "GAP";
+  }
+  if (focus === "restock") {
+    return "GAP|LOW_STOCK";
+  }
+  return "GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE";
+}
+
+function toOverlayCommand(language: string, focus: IssueFocusKey): string {
+  const allowedLabels = toAllowedLabelsForFocus(focus);
+  const focusLabel = toIssueFocusLabel(language, focus);
+
+  if (language.toLowerCase() === "pt-br") {
+    return `Foco de deteccao: ${focusLabel}. Analise o quadro mais recente e responda SOMENTE com JSON valido no formato exato: {"detections":[{"id":"string","label":"${allowedLabels}","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Regras estritas: 1) use apenas os labels permitidos, 2) coordenadas normalizadas entre 0 e 1, 3) sem markdown e sem texto extra, 4) se nao houver ocorrencias validas, retorne {"detections":[]}.`;
+  }
+  return `Detection focus: ${focusLabel}. Analyze the latest frame and reply ONLY with valid JSON in this exact shape: {"detections":[{"id":"string","label":"${allowedLabels}","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Strict rules: 1) use only allowed labels, 2) normalized 0..1 coordinates, 3) no markdown and no extra text, 4) if no valid matches exist, return {"detections":[]}.`;
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -121,15 +160,6 @@ function loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
-  return window.btoa(binary);
-}
-
 export interface OverlayDetection {
   id: string;
   label: string;
@@ -145,6 +175,21 @@ export interface OverlayDetection {
 interface OverlayUpdateMessage {
   type: "overlay-update";
   detections?: unknown;
+  focus?: unknown;
+  source?: unknown;
+}
+
+function normalizeIssueFocus(value: unknown): IssueFocusKey {
+  if (value === "alignment") {
+    return "alignment";
+  }
+  if (value === "gaps") {
+    return "gaps";
+  }
+  if (value === "restock") {
+    return "restock";
+  }
+  return "all";
 }
 
 function clamp01(value: number): number {
@@ -226,12 +271,14 @@ function normalizeOverlayDetections(
 interface CameraStreamProps {
   onFrame?: (frame: Blob) => void;
   overlay?: ReactNode;
+  controls?: ReactNode;
   frameIntervalMs?: number;
 }
 
 const CameraStream = ({
   onFrame,
   overlay,
+  controls,
   frameIntervalMs = 1000,
 }: CameraStreamProps) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -348,13 +395,14 @@ const CameraStream = ({
           Frames are sampled every {Math.round(frameIntervalMs / 100) / 10}s and
           streamed to the Gemini Live session.
         </Typography>
+        {controls}
       </CardContent>
     </Card>
   );
 };
 
 interface VoiceCaptureProps {
-  onAudioChunk?: (chunk: ArrayBuffer) => void;
+  onAudioChunk?: (chunk: ArrayBuffer, mimeType: string) => void;
   pushToTalk?: boolean;
   language?: string;
 }
@@ -366,35 +414,135 @@ const VoiceCapture = ({
 }: VoiceCaptureProps) => {
   const [recording, setRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+
+  const floatToPcm16 = (input: Float32Array): ArrayBuffer => {
+    const buffer = new ArrayBuffer(input.length * 2);
+    const view = new DataView(buffer);
+
+    for (let index = 0; index < input.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, input[index]));
+      const encoded = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(index * 2, encoded, true);
+    }
+
+    return buffer;
+  };
 
   const stopRecorder = useCallback(() => {
     const recorder = mediaRecorderRef.current;
-    if (!recorder) return;
-    recorder.stop();
-    recorder.stream.getTracks().forEach((track) => track.stop());
-    mediaRecorderRef.current = null;
+
+    if (recorder) {
+      recorder.stop();
+      recorder.stream.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+    }
+
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current.onaudioprocess = null;
+      processorRef.current = null;
+    }
+
+    if (mediaSourceRef.current) {
+      mediaSourceRef.current.disconnect();
+      mediaSourceRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
+    }
+
     setRecording(false);
   }, []);
 
   const startRecorder = useCallback(async () => {
-    if (mediaRecorderRef.current) {
+    if (
+      mediaRecorderRef.current ||
+      (audioContextRef.current && processorRef.current)
+    ) {
       return;
     }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm",
-        audioBitsPerSecond: 48000,
-      });
+      audioStreamRef.current = stream;
 
-      recorder.addEventListener("dataavailable", async (event) => {
-        if (!event.data.size) return;
-        const arrayBuffer = await event.data.arrayBuffer();
-        onAudioChunk?.(arrayBuffer);
-      });
+      const AudioContextCtor =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
 
-      recorder.start(500);
-      mediaRecorderRef.current = recorder;
+      if (AudioContextCtor) {
+        const audioContext = new AudioContextCtor({ sampleRate: 16000 });
+        audioContextRef.current = audioContext;
+
+        if (audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (event) => {
+          const channelData = event.inputBuffer.getChannelData(0);
+          if (!channelData || channelData.length === 0) {
+            return;
+          }
+
+          const pcmBuffer = floatToPcm16(channelData);
+          onAudioChunk?.(
+            pcmBuffer,
+            `audio/pcm;rate=${audioContext.sampleRate}`,
+          );
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        mediaSourceRef.current = source;
+        processorRef.current = processor;
+      } else {
+        const supportedMimeCandidates = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/mp4",
+        ];
+        const selectedMimeType = supportedMimeCandidates.find((mimeType) =>
+          typeof MediaRecorder.isTypeSupported === "function"
+            ? MediaRecorder.isTypeSupported(mimeType)
+            : false,
+        );
+
+        const recorder = selectedMimeType
+          ? new MediaRecorder(stream, {
+              mimeType: selectedMimeType,
+              audioBitsPerSecond: 48000,
+            })
+          : new MediaRecorder(stream);
+
+        recorder.addEventListener("dataavailable", async (event) => {
+          if (!event.data.size) return;
+          const arrayBuffer = await event.data.arrayBuffer();
+          onAudioChunk?.(
+            arrayBuffer,
+            event.data.type || recorder.mimeType || "audio/webm",
+          );
+        });
+
+        recorder.start(500);
+        mediaRecorderRef.current = recorder;
+      }
+
       setRecording(true);
     } catch (error) {
       console.error("Unable to access microphone", error);
@@ -406,6 +554,34 @@ const VoiceCapture = ({
       stopRecorder();
     };
   }, [stopRecorder]);
+
+  useEffect(() => {
+    if (!pushToTalk || !recording) {
+      return;
+    }
+
+    const forceStop = () => {
+      stopRecorder();
+    };
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stopRecorder();
+      }
+    };
+
+    window.addEventListener("pointerup", forceStop);
+    window.addEventListener("pointercancel", forceStop);
+    window.addEventListener("blur", forceStop);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.removeEventListener("pointerup", forceStop);
+      window.removeEventListener("pointercancel", forceStop);
+      window.removeEventListener("blur", forceStop);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [pushToTalk, recording, stopRecorder]);
 
   return (
     <Card variant="outlined">
@@ -425,13 +601,12 @@ const VoiceCapture = ({
             color={recording ? "error" : "primary"}
             size="large"
             startIcon={recording ? <MicOffRoundedIcon /> : <MicRoundedIcon />}
-            onMouseDown={pushToTalk ? startRecorder : undefined}
-            onMouseUp={pushToTalk ? stopRecorder : undefined}
-            onMouseLeave={
+            onPointerDown={pushToTalk ? startRecorder : undefined}
+            onPointerUp={pushToTalk ? stopRecorder : undefined}
+            onPointerCancel={pushToTalk ? stopRecorder : undefined}
+            onPointerLeave={
               pushToTalk ? () => recording && stopRecorder() : undefined
             }
-            onTouchStart={pushToTalk ? startRecorder : undefined}
-            onTouchEnd={pushToTalk ? stopRecorder : undefined}
             onClick={
               !pushToTalk
                 ? () => (recording ? stopRecorder() : startRecorder())
@@ -709,6 +884,10 @@ const ActionPanel = ({
             Audit Shelf
           </Button>
           <Typography variant="caption" color="text.secondary">
+            Recommended flow: tap Generate Checklist first to freeze the current
+            capture, then tap Audit Shelf to view the result summary.
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
             Checklist consumes: language ({language.toUpperCase()}), detail mode
             ({detailLevel.toUpperCase()}), deep checks (
             {deepChecks.toUpperCase()}) and thinking level (
@@ -750,12 +929,24 @@ const AuditScreen = ({
   const [overlayPromptsSent, setOverlayPromptsSent] = useState(0);
   const [lastFrameSentAt, setLastFrameSentAt] = useState<number | null>(null);
   const [lastFrameError, setLastFrameError] = useState<string | null>(null);
+  const [issueFocus, setIssueFocus] = useState<IssueFocusKey>("all");
 
   const websocketRef = useRef<WebSocket | null>(null);
   const sessionReadyRef = useRef(false);
   const lastOverlayPromptAtRef = useRef(0);
   const reviewedFramesRef = useRef(0);
   const latestChecklistFrameRef = useRef<string | null>(null);
+  const issueFocusRef = useRef<IssueFocusKey>("all");
+
+  useEffect(() => {
+    issueFocusRef.current = issueFocus;
+    setDetections([]);
+    setLastOverlayUpdateTs(null);
+    lastOverlayPromptAtRef.current = 0;
+    setLastSocketEvent(
+      `focus changed: ${toIssueFocusLabel(settings.language, issueFocus)}`,
+    );
+  }, [issueFocus, settings.language]);
 
   useEffect(() => {
     const modelKey = toModelKey(settings.streamModel);
@@ -809,9 +1000,17 @@ const AuditScreen = ({
           setupComplete?: unknown;
           setup_complete?: unknown;
           detections?: unknown;
+          message?: unknown;
         };
 
         if (payload.type === "overlay-update") {
+          const messageFocus = normalizeIssueFocus(
+            (payload as OverlayUpdateMessage).focus,
+          );
+          if (messageFocus !== issueFocusRef.current) {
+            return;
+          }
+
           const parsedDetections = normalizeOverlayDetections(
             (payload as OverlayUpdateMessage).detections,
           );
@@ -819,7 +1018,13 @@ const AuditScreen = ({
             setDetections(parsedDetections);
             setLastOverlayUpdateTs(Date.now());
             setLastSocketEvent(
-              `overlay-update received (${parsedDetections.length} detections)`,
+              `overlay-update received (${parsedDetections.length} detections, ${messageFocus})`,
+            );
+          } else {
+            setDetections([]);
+            setLastOverlayUpdateTs(Date.now());
+            setLastSocketEvent(
+              `overlay-update received (0 detections, ${messageFocus})`,
             );
           }
           return;
@@ -843,6 +1048,15 @@ const AuditScreen = ({
               ? (payload as { reason: string }).reason
               : "no reason provided";
           setLastSocketEvent(`gemini-closed: ${reason}`);
+          return;
+        }
+
+        if (payload.type === "audio-ignored") {
+          const message =
+            typeof payload.message === "string"
+              ? payload.message
+              : "audio chunk ignored by backend";
+          setLastSocketEvent(`voice ignored: ${message}`);
           return;
         }
 
@@ -1020,7 +1234,8 @@ const AuditScreen = ({
           ws.send(
             JSON.stringify({
               type: "text-command",
-              text: toOverlayCommand(settings.language),
+              focus: issueFocus,
+              text: toOverlayCommand(settings.language, issueFocus),
             }),
           );
           lastOverlayPromptAtRef.current = now;
@@ -1038,30 +1253,33 @@ const AuditScreen = ({
         setLastSocketEvent(`frame send error: ${message}`);
       }
     },
-    [settings.detailLevel, settings.frameRate, settings.language],
+    [issueFocus, settings.detailLevel, settings.frameRate, settings.language],
   );
 
-  const handleAudioChunk = useCallback(
-    (chunk: ArrayBuffer) => {
-      const ws = websocketRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && sessionReadyRef.current) {
-        ws.send(
-          JSON.stringify({
-            type: "audio-chunk",
-            mimeType: "audio/webm;codecs=opus",
-            data: arrayBufferToBase64(chunk),
-          }),
-        );
-      }
+  // Voice capture is temporarily bypassed in the UI.
+  // Keep this callback ready for quick re-enable in a future iteration.
+  // const handleAudioChunk = useCallback(
+  //   (chunk: ArrayBuffer, mimeType: string) => {
+  //     const ws = websocketRef.current;
+  //     if (ws && ws.readyState === WebSocket.OPEN && sessionReadyRef.current) {
+  //       ws.send(
+  //         JSON.stringify({
+  //           type: "audio-chunk",
+  //           mimeType,
+  //           data: arrayBufferToBase64(chunk),
+  //         }),
+  //       );
+  //     }
 
-      console.debug("Audio chunk", {
-        bytes: chunk.byteLength,
-        language: settings.language,
-        pushToTalk: settings.pushToTalk,
-      });
-    },
-    [settings.language, settings.pushToTalk],
-  );
+  //     console.debug("Audio chunk", {
+  //       bytes: chunk.byteLength,
+  //       mimeType,
+  //       language: settings.language,
+  //       pushToTalk: settings.pushToTalk,
+  //     });
+  //   },
+  //   [settings.language, settings.pushToTalk],
+  // );
 
   return (
     <Stack spacing={4} sx={{ width: "100%" }}>
@@ -1085,6 +1303,52 @@ const AuditScreen = ({
           <CameraStream
             onFrame={handleFrame}
             overlay={<OverlayCanvas detections={detections} />}
+            controls={
+              <Stack spacing={0.75} sx={{ mt: 0.5 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 1,
+                  }}
+                >
+                  <Typography variant="caption" color="text.secondary">
+                    Detection focus
+                  </Typography>
+                  <FormControl
+                    size="small"
+                    sx={{ minWidth: 168, maxWidth: 220 }}
+                  >
+                    <Select
+                      value={issueFocus}
+                      onChange={(event) =>
+                        setIssueFocus(event.target.value as IssueFocusKey)
+                      }
+                      inputProps={{ "aria-label": "Detection focus" }}
+                    >
+                      <MenuItem value="all">
+                        {toIssueFocusLabel(settings.language, "all")}
+                      </MenuItem>
+                      <MenuItem value="alignment">
+                        {toIssueFocusLabel(settings.language, "alignment")}
+                      </MenuItem>
+                      <MenuItem value="gaps">
+                        {toIssueFocusLabel(settings.language, "gaps")}
+                      </MenuItem>
+                      <MenuItem value="restock">
+                        {toIssueFocusLabel(settings.language, "restock")}
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+                </Box>
+                <Typography variant="caption" color="text.secondary">
+                  {issueFocus === "all"
+                    ? "Shows all supported shelf issue overlays."
+                    : `Shows only ${toIssueFocusLabel(settings.language, issueFocus).toLowerCase()} overlays; other labels are filtered out.`}
+                </Typography>
+              </Stack>
+            }
             frameIntervalMs={frameRateToIntervalMs(settings.frameRate)}
           />
           {SHOW_OVERLAY_DEBUG_PANEL && (
@@ -1123,6 +1387,10 @@ const AuditScreen = ({
                     Overlay prompts sent: {overlayPromptsSent}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
+                    Focus filter:{" "}
+                    {toIssueFocusLabel(settings.language, issueFocus)}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
                     Last frame sent:{" "}
                     {lastFrameSentAt
                       ? new Date(lastFrameSentAt).toLocaleTimeString()
@@ -1143,12 +1411,14 @@ const AuditScreen = ({
           )}
         </Stack>
         <Stack spacing={3} flex={{ xs: 1, md: 1 }}>
+          {/*
           <VoiceCapture
             onAudioChunk={handleAudioChunk}
             pushToTalk={settings.pushToTalk}
             language={settings.language}
           />
           <Divider />
+          */}
           <ActionPanel
             onAudit={handleAuditShelfClick}
             onGenerateChecklist={handleGenerateChecklist}
