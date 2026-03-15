@@ -9,6 +9,25 @@ dotenv.config();
 
 const app = express();
 
+const genAiSdkModel = process.env.GENAI_SDK_MODEL ?? "gemini-2.5-flash";
+const overlayDetectionModel =
+  process.env.OVERLAY_DETECTION_MODEL ?? genAiSdkModel;
+let genAiSdkClientPromise: Promise<any | null> | null = null;
+
+async function getGenAiSdkClient() {
+  if (!process.env.GOOGLE_API_KEY) {
+    return null;
+  }
+
+  if (!genAiSdkClientPromise) {
+    genAiSdkClientPromise = import("@google/genai").then((module) => {
+      return new module.GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+    });
+  }
+
+  return genAiSdkClientPromise;
+}
+
 const allowedOrigins = [
   process.env.PWA_ORIGIN ?? "http://localhost:5173",
   process.env.PUBLIC_PWA_URL ?? "",
@@ -25,6 +44,135 @@ app.use(express.json());
 // Basic liveness probe for uptime checks.
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// Explicit Google GenAI SDK usage for compliance and runtime diagnostics.
+app.get("/health/genai-sdk", async (_req, res) => {
+  const genAiSdkClient = await getGenAiSdkClient();
+  if (!genAiSdkClient) {
+    res.status(503).json({
+      status: "error",
+      message: "GOOGLE_API_KEY is not configured for Google GenAI SDK.",
+    });
+    return;
+  }
+
+  try {
+    const response = await genAiSdkClient.models.generateContent({
+      model: genAiSdkModel,
+      contents: "Respond with OK.",
+    });
+    res.json({
+      status: "ok",
+      model: genAiSdkModel,
+      output: response.text,
+      sdk: "@google/genai",
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "error",
+      model: genAiSdkModel,
+      sdk: "@google/genai",
+      message: (error as Error).message,
+    });
+  }
+});
+
+interface FindingInput {
+  label: string;
+  count: number;
+}
+
+function normalizeFindings(value: unknown): FindingInput[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const candidate = entry as { label?: unknown; count?: unknown };
+      if (typeof candidate.label !== "string") {
+        return null;
+      }
+
+      const count =
+        typeof candidate.count === "number" && Number.isFinite(candidate.count)
+          ? Math.max(1, Math.round(candidate.count))
+          : 1;
+
+      return {
+        label: candidate.label,
+        count,
+      };
+    })
+    .filter((entry): entry is FindingInput => Boolean(entry));
+}
+
+function toChecklistAction(label: string): string {
+  const normalized = label.toLowerCase();
+  if (normalized.includes("gap")) {
+    return "Restock facing to fill shelf gap";
+  }
+  if (normalized.includes("misalign")) {
+    return "Realign product fronts to planogram";
+  }
+  if (normalized.includes("low")) {
+    return "Top up shelf to target fill level";
+  }
+  return "Verify item placement and correct if needed";
+}
+
+function toChecklistPriority(label: string): "high" | "medium" | "low" {
+  const normalized = label.toLowerCase();
+  if (normalized.includes("gap") || normalized.includes("empty")) {
+    return "high";
+  }
+  if (normalized.includes("misalign") || normalized.includes("out")) {
+    return "medium";
+  }
+  return "low";
+}
+
+app.post("/tool/create-checklist", (req, res) => {
+  const aisle =
+    typeof req.body?.aisle === "string" && req.body.aisle.trim().length > 0
+      ? req.body.aisle
+      : "Aisle 12";
+  const findings = normalizeFindings(req.body?.findings);
+
+  const checklist = findings.length
+    ? findings.map((finding, index) => ({
+        id: `chk-${index + 1}`,
+        issue: finding.label,
+        observedCount: finding.count,
+        action: toChecklistAction(finding.label),
+        priority: toChecklistPriority(finding.label),
+      }))
+    : [
+        {
+          id: "chk-1",
+          issue: "No structured shelf issues detected",
+          observedCount: 0,
+          action: "Run another pass and confirm shelf condition manually",
+          priority: "low",
+        },
+      ];
+
+  res.json({
+    status: "ok",
+    aisle,
+    generatedAt: new Date().toISOString(),
+    checklist,
+    totals: {
+      uniqueIssues: checklist.length,
+      observations: findings.reduce((sum, entry) => sum + entry.count, 0),
+    },
+    settings: req.body?.settings ?? {},
+  });
 });
 
 // Example audit summary endpoint; replace with real logic later.
@@ -232,11 +380,20 @@ function extractTextCandidatesFromPayload(
 function parseOverlayDetectionsFromGeminiMessage(
   raw: WebSocket.RawData,
 ): OverlayDetection[] | null {
-  if (typeof raw !== "string") {
+  let text: string;
+  if (typeof raw === "string") {
+    text = raw;
+  } else if (Buffer.isBuffer(raw)) {
+    text = raw.toString("utf8");
+  } else if (Array.isArray(raw)) {
+    text = Buffer.concat(raw).toString("utf8");
+  } else if (raw instanceof ArrayBuffer) {
+    text = Buffer.from(raw).toString("utf8");
+  } else {
     return null;
   }
 
-  const parsed = parseJsonText(raw);
+  const parsed = parseJsonText(text);
   if (!parsed || typeof parsed !== "object") {
     return null;
   }
@@ -276,12 +433,93 @@ function parseOverlayDetectionsFromGeminiMessage(
   return null;
 }
 
+function parseOverlayDetectionsFromText(
+  text: string,
+): OverlayDetection[] | null {
+  const nested = extractJsonObjectOrArray(text);
+  if (!nested || typeof nested !== "object") {
+    return null;
+  }
+
+  const nestedDetections = toOverlayDetections(
+    (nested as { detections?: unknown }).detections,
+  );
+  if (nestedDetections) {
+    return nestedDetections;
+  }
+
+  return toOverlayDetections(nested);
+}
+
+async function detectOverlayFromFrame(input: {
+  prompt: string;
+  frameData: string;
+  mimeType: string;
+}): Promise<OverlayDetection[] | null> {
+  const client = await getGenAiSdkClient();
+  if (!client) {
+    return null;
+  }
+
+  const response = await client.models.generateContent({
+    model: overlayDetectionModel,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `${input.prompt}\nReturn only valid JSON with detections. Detect only shelf issues (gaps, misalignment, low stock, out-of-place). Do not return generic product/object detections.`,
+          },
+          {
+            inlineData: {
+              mimeType: input.mimeType,
+              data: input.frameData,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  if (!response?.text) {
+    return null;
+  }
+
+  return parseOverlayDetectionsFromText(response.text);
+}
+
 function resolveModel(key?: string) {
   if (!key) {
     return MODEL_MAP.default;
   }
   const normalized = key.toLowerCase();
   return MODEL_MAP[normalized] ?? normalized;
+}
+
+function normalizeSessionConfigForModel(
+  model: string,
+  sessionConfig?: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {
+    ...(sessionConfig ?? {}),
+  };
+
+  const generationConfigSource =
+    normalized.generationConfig &&
+    typeof normalized.generationConfig === "object"
+      ? (normalized.generationConfig as Record<string, unknown>)
+      : {};
+  const generationConfig: Record<string, unknown> = {
+    ...generationConfigSource,
+  };
+
+  // Native-audio models require audio response modality in setup.
+  if (model.includes("native-audio")) {
+    generationConfig.responseModalities = ["AUDIO"];
+  }
+
+  normalized.generationConfig = generationConfig;
+  return normalized;
 }
 
 function buildRealtimeUrl() {
@@ -355,6 +593,11 @@ function setupRealtimeBridge(server: http.Server) {
     let currentModel = resolveModel(defaultModelKey);
     let lastVideoSent = 0;
     let hasSentSetup = false;
+    let latestVideoFrame: {
+      data: string;
+      mimeType: string;
+      capturedAt: number;
+    } | null = null;
 
     const teardown = (code = 1000, reason?: string) => {
       if (client.readyState === WebSocket.OPEN) {
@@ -465,10 +708,14 @@ function setupRealtimeBridge(server: http.Server) {
         switch (message.type) {
           case "start": {
             const socket = await ensureGeminiSocket(message.model);
+            const sessionConfig = normalizeSessionConfigForModel(
+              currentModel,
+              message.sessionConfig,
+            );
             const setupPayload = {
               setup: {
                 model: `models/${currentModel}`,
-                ...(message.sessionConfig ?? {}),
+                ...sessionConfig,
               },
             };
             socket.send(JSON.stringify(setupPayload));
@@ -478,10 +725,14 @@ function setupRealtimeBridge(server: http.Server) {
           case "switch-model": {
             hasSentSetup = false;
             const socket = await ensureGeminiSocket(message.model);
+            const sessionConfig = normalizeSessionConfigForModel(
+              currentModel,
+              message.sessionConfig,
+            );
             const setupPayload = {
               setup: {
                 model: `models/${currentModel}`,
-                ...(message.sessionConfig ?? {}),
+                ...sessionConfig,
               },
             };
             socket.send(JSON.stringify(setupPayload));
@@ -498,6 +749,13 @@ function setupRealtimeBridge(server: http.Server) {
               );
               break;
             }
+
+            latestVideoFrame = {
+              data: message.data,
+              mimeType: message.mimeType ?? "image/jpeg",
+              capturedAt: Date.now(),
+            };
+
             const now = Date.now();
             if (now - lastVideoSent < VIDEO_THROTTLE_MS) {
               break;
@@ -508,7 +766,7 @@ function setupRealtimeBridge(server: http.Server) {
               JSON.stringify({
                 realtimeInput: {
                   video: {
-                    mimeType: message.mimeType ?? "image/jpeg",
+                    mimeType: latestVideoFrame.mimeType,
                     data: message.data,
                   },
                 },
@@ -549,20 +807,34 @@ function setupRealtimeBridge(server: http.Server) {
               );
               break;
             }
-            const socket = await ensureGeminiSocket();
-            socket.send(
-              JSON.stringify({
-                clientContent: {
-                  turns: [
-                    {
-                      role: "user",
-                      parts: [{ text: message.text }],
-                    },
-                  ],
-                  turnComplete: true,
-                },
-              }),
-            );
+
+            if (!latestVideoFrame) {
+              client.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "No video frame received yet for overlay detection.",
+                }),
+              );
+              break;
+            }
+
+            const detections = await detectOverlayFromFrame({
+              prompt: message.text,
+              frameData: latestVideoFrame.data,
+              mimeType: latestVideoFrame.mimeType,
+            });
+
+            if (detections && client.readyState === WebSocket.OPEN) {
+              client.send(
+                JSON.stringify({
+                  type: "overlay-update",
+                  detections,
+                  source: "overlay-sdk",
+                  model: overlayDetectionModel,
+                  ts: Date.now(),
+                }),
+              );
+            }
             break;
           }
           case "stop": {
