@@ -17,7 +17,6 @@ import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import MicOffRoundedIcon from "@mui/icons-material/MicOffRounded";
 import CropFreeRoundedIcon from "@mui/icons-material/CropFreeRounded";
 import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
-import LocalPrintshopRoundedIcon from "@mui/icons-material/LocalPrintshopRounded";
 import {
   frameRateToIntervalMs,
   loadSettingsFromStorage,
@@ -67,7 +66,7 @@ function toThinkingTemperature(thinkingLevel: string): number {
 
 function toLanguageInstruction(language: string): string {
   const overlayContract =
-    'When analyzing camera frames, include a strict JSON object with this exact shape: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use normalized 0..1 coordinates and return valid JSON only when detections are present.';
+    'When analyzing camera frames, detect only shelf issues: GAP, MISALIGNED, LOW_STOCK, and OUT_OF_PLACE. Include a strict JSON object with this exact shape: {"detections":[{"id":"string","label":"GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use normalized 0..1 coordinates and return valid JSON only when shelf issues are present. Do not return product names or generic objects.';
   if (language.toLowerCase() === "pt-br") {
     return `Always respond in Brazilian Portuguese. ${overlayContract}`;
   }
@@ -85,9 +84,9 @@ function toAudioSessionConfig(thinkingLevel: string): Record<string, unknown> {
 
 function toOverlayCommand(language: string): string {
   if (language.toLowerCase() === "pt-br") {
-    return `Analise o quadro de video mais recente e responda SOMENTE com JSON valido no formato: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use coordenadas normalizadas de 0 a 1.`;
+    return `Analise o quadro de video mais recente e responda SOMENTE com JSON valido no formato: {"detections":[{"id":"string","label":"GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Detecte apenas problemas de prateleira (espacos vazios, desalinhamento, baixo estoque, item fora do lugar). Use coordenadas normalizadas de 0 a 1 e nao retorne nomes de produtos.`;
   }
-  return `Analyze the most recent video frame and reply ONLY with valid JSON in this format: {"detections":[{"id":"string","label":"string","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Use normalized coordinates from 0 to 1.`;
+  return `Analyze the most recent video frame and reply ONLY with valid JSON in this format: {"detections":[{"id":"string","label":"GAP|MISALIGNED|LOW_STOCK|OUT_OF_PLACE","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}. Detect only shelf issues (gaps, misalignment, low stock, out-of-place). Use normalized coordinates from 0 to 1 and do not return product names.`;
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -109,6 +108,16 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.onerror = () =>
       reject(reader.error ?? new Error("FileReader error"));
     reader.readAsDataURL(blob);
+  });
+}
+
+function loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () =>
+      reject(new Error("Could not decode checklist frame."));
+    image.src = dataUrl;
   });
 }
 
@@ -447,6 +456,141 @@ interface OverlayCanvasProps {
   detections: OverlayDetection[];
 }
 
+function getOverlayStyleByLabel(label: string): {
+  stroke: string;
+  fill: string;
+} {
+  const normalized = label.toUpperCase();
+
+  if (normalized.includes("GAP")) {
+    return {
+      stroke: "rgba(211, 47, 47, 0.95)",
+      fill: "rgba(211, 47, 47, 0.9)",
+    };
+  }
+
+  if (normalized.includes("MISALIGNED")) {
+    return {
+      stroke: "rgba(245, 124, 0, 0.95)",
+      fill: "rgba(245, 124, 0, 0.9)",
+    };
+  }
+
+  if (normalized.includes("LOW_STOCK")) {
+    return {
+      stroke: "rgba(2, 136, 209, 0.95)",
+      fill: "rgba(2, 136, 209, 0.9)",
+    };
+  }
+
+  if (normalized.includes("OUT_OF_PLACE")) {
+    return {
+      stroke: "rgba(123, 31, 162, 0.95)",
+      fill: "rgba(123, 31, 162, 0.9)",
+    };
+  }
+
+  return {
+    stroke: "rgba(14, 111, 255, 0.9)",
+    fill: "rgba(14, 111, 255, 0.85)",
+  };
+}
+
+async function buildChecklistSnapshotDataUrl(input: {
+  frameDataUrl: string;
+  detections: OverlayDetection[];
+}): Promise<string> {
+  const image = await loadImageFromDataUrl(input.frameDataUrl);
+  const width = image.naturalWidth;
+  const height = image.naturalHeight;
+
+  const fullCanvas = document.createElement("canvas");
+  fullCanvas.width = width;
+  fullCanvas.height = height;
+  const fullContext = fullCanvas.getContext("2d");
+  if (!fullContext) {
+    return input.frameDataUrl;
+  }
+
+  fullContext.drawImage(image, 0, 0, width, height);
+
+  input.detections.forEach((det) => {
+    const boxX = det.box.x * width;
+    const boxY = det.box.y * height;
+    const boxW = det.box.width * width;
+    const boxH = det.box.height * height;
+    const style = getOverlayStyleByLabel(det.label);
+
+    fullContext.strokeStyle = style.stroke;
+    fullContext.lineWidth = Math.max(2, Math.round(width * 0.004));
+    fullContext.strokeRect(boxX, boxY, boxW, boxH);
+
+    fullContext.font = `${Math.max(14, Math.round(width * 0.028))}px Inter, sans-serif`;
+    fullContext.fillStyle = style.fill;
+    const label = `${det.label} ${(det.score * 100).toFixed(0)}%`;
+    const metrics = fullContext.measureText(label);
+    const textPadding = 8;
+    const textHeight = Math.max(22, Math.round(width * 0.045));
+    const labelY = Math.max(boxY - textHeight, 0);
+
+    fullContext.fillRect(
+      boxX,
+      labelY,
+      Math.min(metrics.width + textPadding * 2, width - boxX),
+      textHeight,
+    );
+
+    fullContext.fillStyle = "#fff";
+    fullContext.fillText(label, boxX + textPadding, labelY + textHeight - 6);
+  });
+
+  if (!input.detections.length) {
+    return fullCanvas.toDataURL("image/jpeg", 0.88);
+  }
+
+  const minX = Math.min(...input.detections.map((det) => det.box.x));
+  const minY = Math.min(...input.detections.map((det) => det.box.y));
+  const maxX = Math.max(
+    ...input.detections.map((det) => det.box.x + det.box.width),
+  );
+  const maxY = Math.max(
+    ...input.detections.map((det) => det.box.y + det.box.height),
+  );
+
+  const padX = 0.08;
+  const padY = 0.1;
+  const cropXNorm = clamp01(minX - padX);
+  const cropYNorm = clamp01(minY - padY);
+  const cropMaxXNorm = clamp01(maxX + padX);
+  const cropMaxYNorm = clamp01(maxY + padY);
+
+  const cropX = Math.floor(cropXNorm * width);
+  const cropY = Math.floor(cropYNorm * height);
+  const cropW = Math.max(1, Math.floor((cropMaxXNorm - cropXNorm) * width));
+  const cropH = Math.max(1, Math.floor((cropMaxYNorm - cropYNorm) * height));
+
+  const cropCanvas = document.createElement("canvas");
+  cropCanvas.width = cropW;
+  cropCanvas.height = cropH;
+  const cropContext = cropCanvas.getContext("2d");
+  if (!cropContext) {
+    return fullCanvas.toDataURL("image/jpeg", 0.88);
+  }
+
+  cropContext.drawImage(
+    fullCanvas,
+    cropX,
+    cropY,
+    cropW,
+    cropH,
+    0,
+    0,
+    cropW,
+    cropH,
+  );
+  return cropCanvas.toDataURL("image/jpeg", 0.9);
+}
+
 const OverlayCanvas = ({ detections }: OverlayCanvasProps) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -472,12 +616,14 @@ const OverlayCanvas = ({ detections }: OverlayCanvasProps) => {
       const boxW = det.box.width * width;
       const boxH = det.box.height * height;
 
-      context.strokeStyle = "rgba(14, 111, 255, 0.9)";
+      const style = getOverlayStyleByLabel(det.label);
+
+      context.strokeStyle = style.stroke;
       context.lineWidth = 3;
       context.strokeRect(boxX, boxY, boxW, boxH);
 
       context.font = "14px Inter, sans-serif";
-      context.fillStyle = "rgba(14, 111, 255, 0.85)";
+      context.fillStyle = style.fill;
       const label = `${det.label} ${(det.score * 100).toFixed(0)}%`;
       const metrics = context.measureText(label);
       const textPadding = 8;
@@ -512,27 +658,30 @@ const OverlayCanvas = ({ detections }: OverlayCanvasProps) => {
 interface ActionPanelProps {
   onAudit: () => void;
   onGenerateChecklist: () => void;
-  onPrintTags: () => void;
   streamModel: string;
   deepChecks: string;
   thinkingLevel: string;
   connectionStatus: ConnectionStatus;
   checklistLoading: boolean;
-  printLoading: boolean;
   language: string;
   detailLevel: string;
+}
+
+export interface AuditSummarySnapshot {
+  aisle: string;
+  framesReviewed: number;
+  findings: Array<{ label: string; count: number }>;
+  rows: Array<{ id: string; summary: string }>;
 }
 
 const ActionPanel = ({
   onAudit,
   onGenerateChecklist,
-  onPrintTags,
   streamModel,
   deepChecks,
   thinkingLevel,
   connectionStatus,
   checklistLoading,
-  printLoading,
   language,
   detailLevel,
 }: ActionPanelProps) => {
@@ -545,13 +694,6 @@ const ActionPanel = ({
       <CardContent>
         <Stack spacing={2}>
           <Button
-            variant="contained"
-            onClick={onAudit}
-            startIcon={<CropFreeRoundedIcon />}
-          >
-            Audit Shelf
-          </Button>
-          <Button
             variant="outlined"
             onClick={onGenerateChecklist}
             startIcon={<ChecklistRoundedIcon />}
@@ -560,23 +702,17 @@ const ActionPanel = ({
             {checklistLoading ? "Generating…" : "Generate Checklist"}
           </Button>
           <Button
-            variant="outlined"
-            onClick={onPrintTags}
-            startIcon={<LocalPrintshopRoundedIcon />}
-            disabled={printLoading}
+            variant="contained"
+            onClick={onAudit}
+            startIcon={<CropFreeRoundedIcon />}
           >
-            {printLoading ? "Preparing…" : "Print Tags"}
+            Audit Shelf
           </Button>
           <Typography variant="caption" color="text.secondary">
             Checklist consumes: language ({language.toUpperCase()}), detail mode
             ({detailLevel.toUpperCase()}), deep checks (
             {deepChecks.toUpperCase()}) and thinking level (
             {thinkingLevel.toUpperCase()}).
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            Print consumes: language ({language.toUpperCase()}), detail mode (
-            {detailLevel.toUpperCase()}) and stream model (
-            {streamModel.toUpperCase()}).
           </Typography>
         </Stack>
       </CardContent>
@@ -586,22 +722,21 @@ const ActionPanel = ({
 
 interface AuditScreenProps {
   onBack?: () => void;
-  onAuditShelf: () => void;
+  onAuditShelf: (snapshot: AuditSummarySnapshot) => void;
   onChecklistGenerated?: (payload: unknown) => void;
-  onPrintTagsGenerated?: (payload: unknown) => void;
+  onChecklistSnapshotCaptured?: (imageDataUrl: string) => void;
 }
 
 const AuditScreen = ({
   onBack,
   onAuditShelf,
   onChecklistGenerated,
-  onPrintTagsGenerated,
+  onChecklistSnapshotCaptured,
 }: AuditScreenProps) => {
   const [settings] = useState<AppSettings>(() => loadSettingsFromStorage());
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [checklistLoading, setChecklistLoading] = useState(false);
-  const [printLoading, setPrintLoading] = useState(false);
   const [actionNotice, setActionNotice] = useState<{
     severity: "success" | "error";
     message: string;
@@ -611,10 +746,16 @@ const AuditScreen = ({
     null,
   );
   const [lastSocketEvent, setLastSocketEvent] = useState("waiting for WS");
+  const [framesStreamed, setFramesStreamed] = useState(0);
+  const [overlayPromptsSent, setOverlayPromptsSent] = useState(0);
+  const [lastFrameSentAt, setLastFrameSentAt] = useState<number | null>(null);
+  const [lastFrameError, setLastFrameError] = useState<string | null>(null);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const sessionReadyRef = useRef(false);
   const lastOverlayPromptAtRef = useRef(0);
+  const reviewedFramesRef = useRef(0);
+  const latestChecklistFrameRef = useRef<string | null>(null);
 
   useEffect(() => {
     const modelKey = toModelKey(settings.streamModel);
@@ -623,10 +764,16 @@ const AuditScreen = ({
     websocketRef.current = websocket;
     sessionReadyRef.current = false;
     lastOverlayPromptAtRef.current = 0;
+    reviewedFramesRef.current = 0;
+    latestChecklistFrameRef.current = null;
     setConnectionStatus("connecting");
     setDetections([]);
     setLastOverlayUpdateTs(null);
     setLastSocketEvent(`connecting to ${wsUrl}`);
+    setFramesStreamed(0);
+    setOverlayPromptsSent(0);
+    setLastFrameSentAt(null);
+    setLastFrameError(null);
 
     websocket.onopen = () => {
       setConnectionStatus("connected");
@@ -725,6 +872,10 @@ const AuditScreen = ({
       setDetections([]);
       setLastOverlayUpdateTs(null);
       lastOverlayPromptAtRef.current = 0;
+      latestChecklistFrameRef.current = null;
+      setFramesStreamed(0);
+      setOverlayPromptsSent(0);
+      setLastFrameSentAt(null);
       const reason = event.reason || "no reason";
       setLastSocketEvent(`socket closed (${event.code}): ${reason}`);
     };
@@ -738,6 +889,10 @@ const AuditScreen = ({
       setDetections([]);
       setLastOverlayUpdateTs(null);
       lastOverlayPromptAtRef.current = 0;
+      latestChecklistFrameRef.current = null;
+      setFramesStreamed(0);
+      setOverlayPromptsSent(0);
+      setLastFrameSentAt(null);
       setLastSocketEvent("cleanup complete");
     };
   }, [settings.language, settings.streamModel, settings.thinkingLevel]);
@@ -753,6 +908,29 @@ const AuditScreen = ({
 
     return Object.entries(byLabel).map(([label, count]) => ({ label, count }));
   }, [detections]);
+
+  const handleAuditShelfClick = useCallback(() => {
+    const findings = findingsSummary();
+    const summaryRows =
+      findings.length > 0
+        ? findings.slice(0, 2).map((entry, index) => ({
+            id: `${index + 1}`,
+            summary: `${entry.label} x${entry.count}`,
+          }))
+        : [
+            {
+              id: "1",
+              summary: "No structured findings returned yet.",
+            },
+          ];
+
+    onAuditShelf({
+      aisle: "Aisle 12 (Bay 12A)",
+      framesReviewed: reviewedFramesRef.current,
+      findings,
+      rows: summaryRows,
+    });
+  }, [findingsSummary, onAuditShelf]);
 
   const handleGenerateChecklist = useCallback(async () => {
     setChecklistLoading(true);
@@ -781,6 +959,13 @@ const AuditScreen = ({
       const payload = (await response.json()) as unknown;
       console.info("Checklist generated", payload);
       onChecklistGenerated?.(payload);
+      if (latestChecklistFrameRef.current) {
+        const snapshotDataUrl = await buildChecklistSnapshotDataUrl({
+          frameDataUrl: latestChecklistFrameRef.current,
+          detections,
+        });
+        onChecklistSnapshotCaptured?.(snapshotDataUrl);
+      }
       setActionNotice({
         severity: "success",
         message: "Checklist generated successfully.",
@@ -795,60 +980,13 @@ const AuditScreen = ({
     }
   }, [
     findingsSummary,
+    detections,
     onChecklistGenerated,
+    onChecklistSnapshotCaptured,
     settings.deepChecks,
     settings.detailLevel,
     settings.language,
     settings.thinkingLevel,
-  ]);
-
-  const handlePrintTags = useCallback(async () => {
-    setPrintLoading(true);
-    try {
-      const response = await fetch(
-        `${BACKEND_API_URL}/tool/create-shelf-tags`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            aisle: "Aisle 12 (Bay 12A)",
-            findings: findingsSummary(),
-            settings: {
-              language: settings.language,
-              detailLevel: settings.detailLevel,
-              streamModel: settings.streamModel,
-            },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Print tags request failed (${response.status})`);
-      }
-
-      const payload = (await response.json()) as unknown;
-      console.info("Print tags created", payload);
-      onPrintTagsGenerated?.(payload);
-      setActionNotice({
-        severity: "success",
-        message: "Tag print payload created successfully.",
-      });
-    } catch (error) {
-      setActionNotice({
-        severity: "error",
-        message: (error as Error).message,
-      });
-    } finally {
-      setPrintLoading(false);
-    }
-  }, [
-    findingsSummary,
-    onPrintTagsGenerated,
-    settings.detailLevel,
-    settings.language,
-    settings.streamModel,
   ]);
 
   const handleFrame = useCallback(
@@ -858,31 +996,47 @@ const AuditScreen = ({
         return;
       }
 
-      const data = await blobToBase64(frame);
-      ws.send(
-        JSON.stringify({
-          type: "video-frame",
-          mimeType: "image/jpeg",
-          data,
-        }),
-      );
-
-      const now = Date.now();
-      if (now - lastOverlayPromptAtRef.current >= OVERLAY_PROMPT_INTERVAL_MS) {
+      try {
+        const data = await blobToBase64(frame);
+        latestChecklistFrameRef.current = `data:image/jpeg;base64,${data}`;
         ws.send(
           JSON.stringify({
-            type: "text-command",
-            text: toOverlayCommand(settings.language),
+            type: "video-frame",
+            mimeType: "image/jpeg",
+            data,
           }),
         );
-        lastOverlayPromptAtRef.current = now;
-      }
 
-      console.debug("JPEG frame", {
-        size: frame.size,
-        frameRate: settings.frameRate,
-        detailLevel: settings.detailLevel,
-      });
+        reviewedFramesRef.current += 1;
+        setFramesStreamed(reviewedFramesRef.current);
+        setLastFrameSentAt(Date.now());
+        setLastFrameError(null);
+
+        const now = Date.now();
+        if (
+          now - lastOverlayPromptAtRef.current >=
+          OVERLAY_PROMPT_INTERVAL_MS
+        ) {
+          ws.send(
+            JSON.stringify({
+              type: "text-command",
+              text: toOverlayCommand(settings.language),
+            }),
+          );
+          lastOverlayPromptAtRef.current = now;
+          setOverlayPromptsSent((current) => current + 1);
+        }
+
+        console.debug("JPEG frame", {
+          size: frame.size,
+          frameRate: settings.frameRate,
+          detailLevel: settings.detailLevel,
+        });
+      } catch (error) {
+        const message = (error as Error).message;
+        setLastFrameError(message);
+        setLastSocketEvent(`frame send error: ${message}`);
+      }
     },
     [settings.detailLevel, settings.frameRate, settings.language],
   );
@@ -963,6 +1117,21 @@ const AuditScreen = ({
                     Active detections: {detections.length}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
+                    Frames streamed: {framesStreamed}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Overlay prompts sent: {overlayPromptsSent}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Last frame sent:{" "}
+                    {lastFrameSentAt
+                      ? new Date(lastFrameSentAt).toLocaleTimeString()
+                      : "none yet"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Last frame error: {lastFrameError ?? "none"}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
                     Last overlay update:{" "}
                     {lastOverlayUpdateTs
                       ? new Date(lastOverlayUpdateTs).toLocaleTimeString()
@@ -981,15 +1150,13 @@ const AuditScreen = ({
           />
           <Divider />
           <ActionPanel
-            onAudit={onAuditShelf}
+            onAudit={handleAuditShelfClick}
             onGenerateChecklist={handleGenerateChecklist}
-            onPrintTags={handlePrintTags}
             streamModel={settings.streamModel}
             deepChecks={settings.deepChecks}
             thinkingLevel={settings.thinkingLevel}
             connectionStatus={connectionStatus}
             checklistLoading={checklistLoading}
-            printLoading={printLoading}
             language={settings.language}
             detailLevel={settings.detailLevel}
           />
