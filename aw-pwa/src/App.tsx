@@ -14,9 +14,33 @@ import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import PWABadge from "./PWABadge";
 import AuditScreen from "./AuditScreen";
+import type { AuditSummarySnapshot } from "./AuditScreen";
 import AuditSummaryScreen from "./AuditSummaryScreen";
 import SettingsScreen from "./SettingsScreen.tsx";
 import "./App.css";
+
+const CHECKLIST_SNAPSHOT_IMAGE_KEY = "aw_checklist_snapshot_image";
+
+function loadChecklistSnapshotImage(): string | null {
+  try {
+    const value = window.localStorage.getItem(CHECKLIST_SNAPSHOT_IMAGE_KEY);
+    return value && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveChecklistSnapshotImage(value: string | null): void {
+  try {
+    if (value) {
+      window.localStorage.setItem(CHECKLIST_SNAPSHOT_IMAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(CHECKLIST_SNAPSHOT_IMAGE_KEY);
+    }
+  } catch {
+    // Ignore storage write errors to keep audit flow responsive.
+  }
+}
 
 const theme = createTheme({
   palette: {
@@ -157,15 +181,28 @@ function App() {
     "home",
   );
   const [checklistResult, setChecklistResult] = useState<unknown | null>(null);
-  const [printTagsResult, setPrintTagsResult] = useState<unknown | null>(null);
+  const [checklistSnapshotImage, setChecklistSnapshotImage] = useState<
+    string | null
+  >(() => loadChecklistSnapshotImage());
+  const [auditSummary, setAuditSummary] = useState<AuditSummarySnapshot | null>(
+    null,
+  );
 
   const handleStartAudit = () => {
     setChecklistResult(null);
-    setPrintTagsResult(null);
+    setChecklistSnapshotImage(null);
+    saveChecklistSnapshotImage(null);
+    setAuditSummary(null);
     setView("audit");
   };
 
-  const handleAuditShelf = () => {
+  const handleChecklistSnapshotCaptured = (imageDataUrl: string) => {
+    setChecklistSnapshotImage(imageDataUrl);
+    saveChecklistSnapshotImage(imageDataUrl);
+  };
+
+  const handleAuditShelf = (snapshot: AuditSummarySnapshot) => {
+    setAuditSummary(snapshot);
     setView("summary");
   };
 
@@ -206,7 +243,7 @@ function App() {
               onBack={() => setView("home")}
               onAuditShelf={handleAuditShelf}
               onChecklistGenerated={setChecklistResult}
-              onPrintTagsGenerated={setPrintTagsResult}
+              onChecklistSnapshotCaptured={handleChecklistSnapshotCaptured}
             />
           </Container>
         </Box>
@@ -215,18 +252,23 @@ function App() {
           sx={{
             minHeight: "100vh",
             bgcolor: "background.default",
-            px: { xs: 3, md: 6 },
-            pt: "10px",
+            px: { xs: 1, sm: 2, md: 6 },
+            pt: "max(10px, env(safe-area-inset-top))",
             pb: { xs: 4, md: 6 },
             display: "flex",
-            justifyContent: "center",
+            justifyContent: "flex-start",
+            alignItems: "flex-start",
           }}
         >
-          <Container maxWidth="lg">
+          <Container
+            maxWidth="sm"
+            sx={{ px: { xs: 0, sm: 2 }, mx: { xs: 0, sm: "auto" } }}
+          >
             <AuditSummaryScreen
               onBackToAudit={handleBackToAudit}
+              summarySnapshot={auditSummary}
               checklistResult={checklistResult}
-              printTagsResult={printTagsResult}
+              checklistSnapshotImage={checklistSnapshotImage}
             />
           </Container>
         </Box>
