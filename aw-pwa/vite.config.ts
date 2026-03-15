@@ -24,7 +24,7 @@ export default defineConfig({
 
       manifest: {
         name: "Aisle Whisper PWA",
-        short_name: "AW-PWA",
+        short_name: "Aisle Whisper",
         description:
           "Real‑time store shelf audit (camera + voice) with overlays, checklist, and print preview.",
         theme_color: "#ffffff",
