@@ -210,9 +210,12 @@ type ClientMessage =
   | {
       type: "text-command";
       text: string;
+      focus?: "all" | "alignment" | "gaps" | "restock";
     }
   | { type: "stop" }
   | { type: "ping" };
+
+type OverlayFocusKey = "all" | "alignment" | "gaps" | "restock";
 
 interface OverlayDetection {
   id: string;
@@ -224,6 +227,57 @@ interface OverlayDetection {
     width: number;
     height: number;
   };
+}
+
+const OVERLAY_ALLOWED_LABELS: Record<OverlayFocusKey, string[]> = {
+  all: ["GAP", "MISALIGNED", "LOW_STOCK", "OUT_OF_PLACE"],
+  alignment: ["MISALIGNED"],
+  gaps: ["GAP"],
+  restock: ["GAP", "LOW_STOCK"],
+};
+
+function normalizeOverlayFocus(value: unknown): OverlayFocusKey {
+  if (value === "alignment") {
+    return "alignment";
+  }
+  if (value === "gaps") {
+    return "gaps";
+  }
+  if (value === "restock") {
+    return "restock";
+  }
+  return "all";
+}
+
+function normalizeOverlayLabel(value: string): string {
+  return value
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_")
+    .trim();
+}
+
+function buildStrictOverlayPrompt(focus: OverlayFocusKey): string {
+  const labels = OVERLAY_ALLOWED_LABELS[focus].join("|");
+  return [
+    "Analyze the latest shelf frame and return a single JSON object only.",
+    `Allowed labels for this request: ${labels}.`,
+    'Output shape must be exactly: {"detections":[{"id":"string","label":"' +
+      labels +
+      '","score":0.0,"box":{"x":0.0,"y":0.0,"width":0.0,"height":0.0}}]}',
+    'Rules: no markdown, no prose, normalized 0..1 coordinates, and return {"detections":[]} when no valid issues are present.',
+  ].join(" ");
+}
+
+function filterDetectionsByFocus(
+  detections: OverlayDetection[],
+  focus: OverlayFocusKey,
+): OverlayDetection[] {
+  const allowed = new Set(OVERLAY_ALLOWED_LABELS[focus]);
+
+  return detections.filter((detection) => {
+    const normalizedLabel = normalizeOverlayLabel(detection.label);
+    return allowed.has(normalizedLabel);
+  });
 }
 
 const MODEL_MAP: Record<string, string> = {
@@ -468,7 +522,7 @@ async function detectOverlayFromFrame(input: {
         role: "user",
         parts: [
           {
-            text: `${input.prompt}\nReturn only valid JSON with detections. Detect only shelf issues (gaps, misalignment, low stock, out-of-place). Do not return generic product/object detections.`,
+            text: input.prompt,
           },
           {
             inlineData: {
@@ -591,6 +645,7 @@ function setupRealtimeBridge(server: http.Server) {
 
     let geminiSocket: WebSocket | null = null;
     let currentModel = resolveModel(defaultModelKey);
+    let currentOverlayFocus: OverlayFocusKey = "all";
     let lastVideoSent = 0;
     let hasSentSetup = false;
     let latestVideoFrame: {
@@ -640,11 +695,17 @@ function setupRealtimeBridge(server: http.Server) {
           return;
         }
 
+        const filteredDetections = filterDetectionsByFocus(
+          overlayDetections,
+          currentOverlayFocus,
+        );
+
         client.send(
           JSON.stringify({
             type: "overlay-update",
-            detections: overlayDetections,
+            detections: filteredDetections,
             source: "gemini",
+            focus: currentOverlayFocus,
             ts: Date.now(),
           }),
         );
@@ -784,12 +845,24 @@ function setupRealtimeBridge(server: http.Server) {
               );
               break;
             }
+
+            const chunkMimeType = message.mimeType ?? "audio/webm;codecs=opus";
+            if (!chunkMimeType.toLowerCase().startsWith("audio/pcm")) {
+              client.send(
+                JSON.stringify({
+                  type: "audio-ignored",
+                  message: `Unsupported live audio mime type '${chunkMimeType}'. Supported: audio/pcm or audio/pcm;rate=xxxxx.`,
+                }),
+              );
+              break;
+            }
+
             const socket = await ensureGeminiSocket();
             socket.send(
               JSON.stringify({
                 realtimeInput: {
                   audio: {
-                    mimeType: message.mimeType ?? "audio/webm;codecs=opus",
+                    mimeType: chunkMimeType,
                     data: message.data,
                   },
                 },
@@ -818,19 +891,26 @@ function setupRealtimeBridge(server: http.Server) {
               break;
             }
 
+            currentOverlayFocus = normalizeOverlayFocus(message.focus);
+            const strictPrompt = buildStrictOverlayPrompt(currentOverlayFocus);
             const detections = await detectOverlayFromFrame({
-              prompt: message.text,
+              prompt: strictPrompt,
               frameData: latestVideoFrame.data,
               mimeType: latestVideoFrame.mimeType,
             });
 
             if (detections && client.readyState === WebSocket.OPEN) {
+              const filteredDetections = filterDetectionsByFocus(
+                detections,
+                currentOverlayFocus,
+              );
               client.send(
                 JSON.stringify({
                   type: "overlay-update",
-                  detections,
+                  detections: filteredDetections,
                   source: "overlay-sdk",
                   model: overlayDetectionModel,
+                  focus: currentOverlayFocus,
                   ts: Date.now(),
                 }),
               );
