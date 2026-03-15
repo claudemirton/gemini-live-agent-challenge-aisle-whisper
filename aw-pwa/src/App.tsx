@@ -252,8 +252,11 @@ function App() {
           sx={{
             minHeight: "100vh",
             bgcolor: "background.default",
-            px: { xs: 1, sm: 2, md: 6 },
-            pt: "max(10px, env(safe-area-inset-top))",
+            px: { xs: 0, sm: 2, md: 6 },
+            pt: {
+              xs: "env(safe-area-inset-top)",
+              sm: "max(10px, env(safe-area-inset-top))",
+            },
             pb: { xs: 4, md: 6 },
             display: "flex",
             justifyContent: "flex-start",
@@ -261,8 +264,13 @@ function App() {
           }}
         >
           <Container
-            maxWidth="sm"
-            sx={{ px: { xs: 0, sm: 2 }, mx: { xs: 0, sm: "auto" } }}
+            maxWidth={false}
+            disableGutters
+            sx={{
+              px: { xs: 0, sm: 2 },
+              width: "100%",
+              mx: { xs: 0, sm: "auto" },
+            }}
           >
             <AuditSummaryScreen
               onBackToAudit={handleBackToAudit}
