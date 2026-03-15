@@ -49,6 +49,7 @@ const AuditSummaryScreen = ({
         width: "100%",
         maxWidth: { xs: "100%", sm: 720 },
         mx: { xs: 0, sm: "auto" },
+        px: { xs: 1.25, sm: 0 },
       }}
     >
       <Button
@@ -63,9 +64,10 @@ const AuditSummaryScreen = ({
       <Card
         variant="outlined"
         sx={{
-          px: { xs: 2, sm: 4 },
-          py: { xs: 2.5, sm: 4 },
-          borderRadius: 3,
+          px: { xs: 1.5, sm: 4 },
+          py: { xs: 2, sm: 4 },
+          borderRadius: { xs: 2, sm: 3 },
+          boxShadow: { xs: "none", sm: undefined },
         }}
       >
         <Stack spacing={3}>
