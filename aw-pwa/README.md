@@ -1,61 +1,59 @@
-# AisleWhisper — Frontend (PWA)
+# AisleWhisper Frontend (PWA)
 
-**Real‑time store shelf audit (camera + voice) with overlays, checklist, and print preview.**  
-Built with **React + Vite + TypeScript + MUI**.
+Real-time shelf audit PWA built with React, Vite, TypeScript, and MUI.
 
----
+## Features
 
-## ✨ Features
+- Camera preview with live overlay boxes.
+- Strict issue-focus selector for detection scope:
+  - All shelf issues
+  - Facing alignment
+  - Shelf gaps
+  - Restock priority
+- Checklist generation and summary view.
+- Snapshot capture when generating checklist.
 
-- **Live Audit**: camera preview + **wireframe overlays** (GAP / LABEL / Planogram).
-- **Voice (optional)**: push‑to‑talk commands; all actions mirrored by buttons.
-- **Planogram**: run planogram‑free (heuristics) or upload a simple JSON/CSV.
-- **Checklist**: editable restock list with export to JSON.
-- **Print Preview**: A4/Letter, portrait/landscape, margins, gutter, tag size, cut marks.
+Supported overlay labels:
 
----
+- `GAP`
+- `MISALIGNED`
+- `LOW_STOCK`
+- `OUT_OF_PLACE`
 
-## 🧱 Tech stack
+## Scope Notes
 
-- React 18 • Vite • TypeScript
-- MUI v5 (light/dark theme, domain chips)
-- Web APIs: `getUserMedia`, WebSocket, Web Share/Print
+- Voice capture UI is currently disabled in the audit screen.
+- Print tags / print-preview flow is not part of this reduced-scope build.
 
----
+## Requirements
 
-## ⚙️ Requirements
+- Node.js 18+
+- Backend service running (WebSocket + REST)
 
-- Node.js **18+**
-- A running **backend** (WebSocket + REST tools). The app uses:
-  - **WS**: `ws://<SERVER>/ws/live` (audio + JPEG frames)
-  - **REST**: `/tool/create-checklist`, `/tool/create-shelf-tags` (PDF)
+Endpoints used by the app:
 
----
+- WebSocket: `/ws/live`
+- REST: `/tool/create-checklist`
 
-## 🚀 Quick start
+## Quick Start
 
-````bash
-# from apps/pwa/
+From `aw-pwa/`:
+
+```bash
 npm install
 npm run dev
-# open the printed URL (e.g., http://localhost:5173)
-``
+```
 
 ## Environment Variables
 
-The app reads backend endpoints from Vite public env vars:
-
-- `VITE_BACKEND_WS_URL`
-- `VITE_BACKEND_API_URL`
-
-For local development, create `aw-pwa/.env.local` with:
+Set in `aw-pwa/.env.local` for local dev:
 
 ```bash
 VITE_BACKEND_WS_URL=ws://localhost:8080/ws/live
 VITE_BACKEND_API_URL=http://localhost:8080
-````
+```
 
-For production/distribution builds, inject env vars at build time:
+For production builds:
 
 ```bash
 VITE_BACKEND_WS_URL=wss://your-backend-domain/ws/live \
@@ -63,4 +61,4 @@ VITE_BACKEND_API_URL=https://your-backend-domain \
 npm run build
 ```
 
-Then deploy the generated `dist/` folder (for Firebase Hosting this is `firebase deploy --only hosting`).
+Deploy `aw-pwa/dist` to hosting.

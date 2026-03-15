@@ -1,53 +1,49 @@
-# AisleWhisper — Backend (Node/Express)
+# AisleWhisper Backend (Node/Express)
 
-**Low‑latency relay + tools** for the AisleWhisper PWA.  
-Handles **WebSocket streaming** (audio + JPEG frames) to a **Gemini Live** session and exposes a **REST tool** to generate the **restock checklist (JSON)**.
+Realtime relay and checklist tooling for the AisleWhisper PWA.
 
-> Frontend repo: `apps/pwa` (in the monorepo)  
-> Backend repo: `apps/server` (this folder)
+## What This Service Does
 
----
+- Accepts websocket traffic from the PWA on `/ws/live`.
+- Streams frame/audio inputs to Gemini Live session handling.
+- Runs strict frame-based overlay detection through Google GenAI SDK sidecar calls.
+- Enforces focus filtering for overlay labels.
+- Exposes checklist generation endpoint:
+  - `/tool/create-checklist`
+- Exposes health endpoints:
+  - `/health`
+  - `/health/genai-sdk`
 
-## ✨ What this service does
+## Current Detection Scope
 
-- Maintains a **WebSocket** for real‑time **voice + frame** streaming from the PWA.
-- Holds the **model session** (Gemini Live for streaming + Gemini standard for “planning/outputs”).
-- Includes explicit **Google GenAI SDK** usage (`@google/genai`) via a diagnostics endpoint.
-- Emits **overlay** messages back to the client with boxes/tags (GAP / LABEL / Planogram).
-- Provides **tool endpoint**:
-  - `/tool/create-checklist` → restock checklist (JSON)
-- Exposes `/health`, `/health/genai-sdk`, and structured logs for uptime checks.
+Supported labels:
 
----
+- `GAP`
+- `MISALIGNED`
+- `LOW_STOCK`
+- `OUT_OF_PLACE`
 
-## 🗺️ High‑level flow
+Focus keys accepted in `text-command` flow:
 
-```
-PWA (mic + camera)
-  │   WebSocket: audio chunks + JPEG frames (~1 FPS)
-  ▼
-Node/Express (this service)
-  │   forwards to Gemini Live + invokes tools
-  ▼
-Overlay JSON + audio_out  ─────────► back to PWA
-Checklist JSON ────────────────────► via REST
-```
+- `all`
+- `alignment`
+- `gaps`
+- `restock`
 
----
+The backend normalizes invalid/missing focus to `all` and filters returned detections accordingly.
 
-## 🔧 Requirements
+## Scope Notes
 
-- Node.js **18+**
-- Google GenAI SDK dependency: **`@google/genai`**
-- An auth method for Gemini:
-  - **Developer API key** (simple) – `GOOGLE_API_KEY`
-  - **Vertex AI service account** (recommended for prod) – `GOOGLE_APPLICATION_CREDENTIALS` / ADC
+- Voice command UX is currently bypassed in frontend UI.
+- Print tags endpoint flow is removed from current reduced scope.
 
----
+## Requirements
 
-## ✅ SDK Compliance Check
+- Node.js 18+
+- `@google/genai`
+- `GOOGLE_API_KEY` configured (or equivalent Gemini auth setup)
 
-To verify explicit Google GenAI SDK integration in runtime:
+## SDK Compliance Check
 
 ```bash
 curl http://localhost:8080/health/genai-sdk
@@ -57,6 +53,4 @@ Expected response includes:
 
 - `status: "ok"`
 - `sdk: "@google/genai"`
-- model output text
-
----
+- selected model and sample output

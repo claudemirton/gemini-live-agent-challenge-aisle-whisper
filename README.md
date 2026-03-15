@@ -1,21 +1,29 @@
+# Aisle Whisper
 
-# 🛒 Aisle Whisper
-**Real‑time store shelf audit & replenishment agent — camera + voice + planogram**
+Real-time shelf audit MVP with camera overlays and checklist generation.
 
-> Monorepo for the **entire project** (frontend PWA + backend relay/tools).  
-> Built to demo a practical, agentic workflow: *see the shelf, speak the command, get overlays, a restock checklist, and printable tags*.
+This monorepo contains:
 
----
+- `aw-pwa/` (frontend PWA, React + Vite + TypeScript)
+- `aw-backend/` (backend relay/tools, Node + Express + WebSocket)
 
-- Detects **GAPs** (empty facings), **LABEL** issues (missing/mismatched/crooked), and **PLANOGRAM** mismatches.
-- Shows **wireframe overlays** in real time (bounding boxes + tags).
-- Generates a **structured restock checklist (JSON)** and **printable tags (PDF/print preview)**.
-- Works **planogram‑free** (heuristics) or with a **planogram JSON** for precise checks.
+## Current Scope (Reduced)
 
----
+- Detect shelf issues from camera frames with overlay boxes.
+- Supported issue labels: `GAP`, `MISALIGNED`, `LOW_STOCK`, `OUT_OF_PLACE`.
+- Generate a structured checklist (`/tool/create-checklist`) from observed findings.
+- Use a mobile-friendly focus selector to constrain overlay detection:
+  - All shelf issues
+  - Facing alignment
+  - Shelf gaps
+  - Restock priority
 
-**Key points**
+## Out of Scope (Current Build)
 
-- The frontend streams **audio** and **JPEG frames** (~1 FPS) to the backend over **WebSocket**.  
-- The backend holds the **Live session** (voice/video) and calls tools for **Checklist** and **Tag PDF/Print**.  
-- **Planogram** (if provided) improves precision; otherwise we run heuristic checks.
+- Voice-command workflow in the UI is temporarily bypassed.
+- Printable shelf tags / print-preview tool flow is removed.
+
+## Notes
+
+- Overlay detection is enforced with strict backend focus filtering to reduce label drift.
+- Frontend and backend are deployed independently (Firebase Hosting + Cloud Run).
