@@ -139,3 +139,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
 .DS_Store
+
+/demo-video
+DEMO_SCRIPT_3MIN_GEMINI_LIVE_HACKATHON.md
